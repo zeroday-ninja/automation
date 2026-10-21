@@ -61,7 +61,11 @@ from openhands.automation.telemetry import (
     get_request_telemetry_context,
 )
 from openhands.automation.utils import utcnow
-from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
+from openhands.automation.utils.model_profiles import (
+    ensure_agent_profile_exists,
+    resolve_model_profile_for_user,
+    validate_agent_profile_combination,
+)
 from openhands.automation.utils.state import (
     automation_state_enabled,
     model_automation_state,
@@ -159,6 +163,14 @@ class CreatePromptAutomationRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    agent_profile_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Agent profile to run the prompt with: an ACP agent such as Claude "
+            "Code or Codex, or an OpenHands profile with its own LLM. The profile "
+            "owns the model, so it cannot be combined with `model`."
+        ),
+    )
     name: str = Field(..., min_length=1, max_length=500)
     prompt: str = Field(
         ...,
@@ -523,7 +535,16 @@ async def create_automation_from_prompt(
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
-    model = resolve_model_profile_for_user(body.model, user)
+    # An agent profile owns its model: the run creates its conversation from
+    # the profile instead of building an agent around a model profile, so no
+    # model is resolved or stored for it.
+    validate_agent_profile_combination(body.agent_profile_id, body.model)
+    await ensure_agent_profile_exists(body.agent_profile_id, request, user)
+    model = (
+        None
+        if body.agent_profile_id is not None
+        else resolve_model_profile_for_user(body.model, user)
+    )
     state = model_automation_state(body.state, body.enabled)
 
     # 1. Generate tarball with SDK code, prompt, and optional repos config
@@ -588,6 +609,7 @@ async def create_automation_from_prompt(
             prompt=body.prompt,
             preset_metadata=preset_metadata,
             model=model,
+            agent_profile_id=body.agent_profile_id,
             trigger=body.trigger.model_dump(),
             observability_associations=body.observability_associations,
             tarball_path=tarball_path,
