@@ -10,7 +10,7 @@ recipe.
 
 Maintenance baseline: `7cda26ab0f60158a2a6dc74964e9aaf84008e04a` (first pass, 2026-10-12).
 
-The map has **258 sub-features**.
+The map has **274 sub-features**.
 
 ## Baseline preconditions
 
@@ -88,11 +88,12 @@ them honest: [../maintenance.md](../maintenance.md).
 | F10 | [Custom webhooks](F10-custom-webhooks.md) | webhook create, secrets and rotation, list, patch, disable, delete, signed delivery | `/v1/webhooks` | baseline | 12 |
 | F11 | [Event ingestion and triggers](F11-event-triggers.md) | signature schemes, matching, filters, dedupe, built-in GitHub, Jira and Bitbucket sources, conversation coalescing, requested types | `/v1/events/{org_id}/{source}`, `/v1/events/{source}/requested-types` | `Launch:` webhook secret | 20 |
 | F12 | [Per-automation KV store](F12-kv-store.md) | user and run-token auth, get, put, patch, delete, counters, lists, versions, batches, isolation, encryption | `/v1/kv` | baseline | 30 |
-| F13 | [Git sync](F13-git-sync.md) | config, remote check, export and import, conflicts, deletes, encryption, errors, lease, loop interval | `/v1/git-sync/...` | `Launch:` git timeout | 29 |
+| F13 | [Git sync](F13-git-sync.md) | the default remote: config, remote check, export and import, conflicts, deletes, encryption, errors, lease, loop interval | `/v1/git-sync/status`, `/config`, `/check`, `/sync` | `Launch:` git timeout | 29 |
 | F14 | [Watchdog, timeouts and auto-disable](F14-watchdog-and-auto-disable.md) | watchdog verdicts, timeouts, late callbacks, auth-failure and consecutive-failure disable, workspace purge | the watchdog loop (no route) | baseline | 13 |
 | F15 | [Telemetry consent](F15-telemetry-consent.md) | consent, capture gating, anonymous and aggregate events, persistence, cloud mode | `POST /v1/telemetry/consent` | `Launch:` telemetry sink | 9 |
 | F16 | [The run's contract with the Agent Server](F16-agent-server-contract.md) | bash command and output, uploads cleanup, conversation tags, model profiles, agent-server failures | Agent Server `/api/...` | baseline; `llm`, `pypi` | 8 |
 | F17 | [Stream sources (Slack Socket Mode)](F17-stream-sources.md) | stream supervisor, config parsing, retries, kill switch, Socket Mode delivery | the stream supervisor (no route) | baseline; a real Slack app for two blocked bullets | 7 |
+| F18 | [Git sync remotes and assignments](F18-git-sync-remotes.md) | several repositories per org, the default remote, adoption of unassigned automations, per-remote check, trigger and pause, moving automations between remotes, deletes, the legacy routes as the default's second entry point | `/v1/git-sync/remotes`, `/v1/git-sync/remotes/{id}/...`, `/v1/git-sync/assignments` | `git` | 16 |
 
 ## Not mapped
 

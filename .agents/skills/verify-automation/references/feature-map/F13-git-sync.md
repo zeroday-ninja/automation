@@ -10,7 +10,10 @@ configuration plus the last cycle's commit, time, error, lease and dirty
 count. Every automation create, update and delete marks it dirty, even while
 sync is unconfigured, and a dirty automation wins over a conflicting git-side
 edit. A background loop (15 s tick) also syncs on `interval_seconds`, which
-defaults to 0 (manual only). Recipes here use a local bare repository as the
+defaults to 0 (manual only). These four routes act on the org's *default*
+remote (`automation_git_sync_remote`), which `PUT /config` creates on first
+save; an org can sync further repositories through the remotes and
+assignments routes of F18. Recipes here use a local bare repository as the
 remote (`fixture git-remote`), which drives the same `git` CLI code path as a
 hosted remote, translated from "GitHub" to "a git remote".
 
@@ -31,12 +34,12 @@ Routes: `GET /api/automation/v1/git-sync/status`, `PUT /api/automation/v1/git-sy
 - `F13.check-bad-remote`: `POST /check` on a path that is not a repository answers 200 `{ok:false}` with git's failure (`git command failed (128): git ls-remote --heads -- <url> main`).
 - `F13.check-redaction`: credentials embedded in the URL come back as `***` in the check detail, and neither they nor the token appear.
 - `F13.config-enable`: `PUT /config {"repo_url":...}` enables sync without a restart, `GET /status` reads it back, and the caller is stored as the configuring user.
-- `F13.repo-conflict`: `PUT /config` answers 409 when another org already syncs the same repository, branch and path (URL compared case-insensitively, without trailing `/` or `.git`).
+- `F13.repo-conflict`: `PUT /config` answers 409 `Another repository configuration already syncs this repository, branch and path...` when a remote of another org already syncs the same repository, branch and path (URL compared case-insensitively, without trailing `/` or `.git`).
 - `F13.config-partial`: an omitted field is unchanged, `null` reverts a field to its default, and a blank string counts as `null`.
 - `F13.config-validation`: `path` is normalized (slashes, `.` segments stripped; blank reverts) and `..`, `/` or a negative or non-integer `interval_seconds` answer 422 without changing anything; unknown fields are ignored.
 - `F13.config-pause`: `enabled:false` pauses sync (status `enabled:false`, `POST /sync` 503) and `enabled:true` resumes it.
 - `F13.secrets-at-rest`: a token set through `PUT /config` never appears in the status body and is stored as a Fernet token (`gAAAAA...`) in the org's overrides JSON; `null` removes it.
-- `F13.sync-first`: `POST /sync` answers 202 `{triggered:true}`; the cycle pushes the branch to the empty remote, status records `last_synced_commit` equal to the remote's `main` and clears `dirty_count`, `/check` then reports `branch_exists:true`, and the checkout lives in the run's `workspaces/git-sync`.
+- `F13.sync-first`: `POST /sync` answers 202 `{triggered:true}`; the cycle pushes the branch to the empty remote, status records `last_synced_commit` equal to the remote's `main` and clears `dirty_count`, `/check` then reports `branch_exists:true`, and the checkout lives in the run's `workspaces/git-sync/<default remote id>`.
 - `F13.export-layout`: each automation is exported as `automations/<slug>/automation.yaml` plus its tarball extracted under `tarball/`, with `tarball_source.type: internal` and executable members listed in `tarball_executables`.
 - `F13.commit-author`: commits use the message `Sync automations from agent server` and author `OpenHands Automation <automation@openhands.dev>` unless `author_name`/`author_email` are set.
 - `F13.slugs`: slugs are the lowercased name with non-alphanumeric runs collapsed to `-`, capped at 80 characters; a second automation with the same name gets `-<first 8 hex of its id>`.
@@ -60,6 +63,11 @@ Routes: `GET /api/automation/v1/git-sync/status`, `PUT /api/automation/v1/git-sy
   `view_automations`; the other three need `manage_automations`. The local
   key carries both, so the 403 path is not reachable in local mode. Every
   route acts on the caller's org (`user.org_id`); local mode has exactly one.
+  All four act on the org's default remote: `GET /status` reads it (or the
+  unconfigured defaults when the org has none), `PUT /config` creates it on
+  first save and edits it afterwards, `POST /check` tests it and `POST /sync`
+  triggers its cycle. The same remote is also reachable as
+  `/v1/git-sync/remotes/{id}` (F18, `F18.legacy-default`).
 - Agent Canvas: the Git Sync settings page (in `OpenHands/OpenHands`) calls
   `PUT /config` on save, `POST /check` for "Test connection", `POST /sync`
   for "Sync now" and polls `GET /status`. No SDK or TypeScript client method
@@ -142,24 +150,26 @@ Preconditions:
   control-automation api PUT /v1/git-sync/config --json "{\"repo_url\":\"$URL\"}" --expect 200 --check enabled eq true --check repo_url eq "$URL" --check branch eq main --save F13.config-enable/put
   control-automation api GET /v1/git-sync/status --expect 200 --check enabled eq true --check repo_url eq "$URL" --check last_synced_at eq null
   ME=$(control-automation api GET "/v1/$AM" --field user_id)
-  control-automation state sql "SELECT configured_by_user_id AS who FROM automation_git_sync_org_config" --check count eq 1 --check rows.0.who eq "$(echo "$ME" | tr -d -)"
+  control-automation state sql "SELECT is_default, configured_by_user_id AS who FROM automation_git_sync_remote" --check count eq 1 --check rows.0.is_default eq 1 --check rows.0.who eq "$(echo "$ME" | tr -d -)"
   ```
-  No cycle runs on save: `last_synced_at` stays null until a sync.
-- **Another org already syncs the repo (`F13.repo-conflict`).** Seed a second org's row (local mode has only one org, so it goes straight into the database), then save the same repo.
+  No cycle runs on save: `last_synced_at` stays null until a sync. The save
+  created the org's default remote (the one row above).
+- **Another org already syncs the repo (`F13.repo-conflict`).** Seed a second org's default remote (local mode has only one org, so it goes straight into the database), then save the same repo.
   ```sh
-  control-automation exec -- python3 -c 'import json, os, sqlite3, sys; db = sqlite3.connect(os.environ["AUTOMATION_VERIFY_RUN"] + "/private/automations.db", timeout=10); db.execute("INSERT INTO automation_git_sync_org_config (org_id, overrides, consecutive_auth_failures) VALUES (?, ?, 0)", ("00000000000000000000000000000f13", json.dumps({"git_sync_repo_url": sys.argv[1].upper() + "/"}))); db.commit()' "$URL"
-  control-automation api PUT /v1/git-sync/config --json "{\"repo_url\":\"${URL%.git}\"}" --expect 409 --check detail contains 'Another organization already syncs this repository, branch and path' --save F13.repo-conflict/put
+  control-automation exec -- python3 -c 'import json, os, sqlite3, sys; db = sqlite3.connect(os.environ["AUTOMATION_VERIFY_RUN"] + "/private/automations.db", timeout=10); db.execute("INSERT INTO automation_git_sync_remote (id, org_id, is_default, overrides) VALUES (?, ?, 1, ?)", ("00000000000000000000000000000f14", "00000000000000000000000000000f13", json.dumps({"git_sync_repo_url": sys.argv[1].upper() + "/"}))); db.commit()' "$URL"
+  control-automation api PUT /v1/git-sync/config --json "{\"repo_url\":\"${URL%.git}\"}" --expect 409 --check detail contains 'Another repository configuration already syncs this repository, branch and path' --save F13.repo-conflict/put
   control-automation api PUT /v1/git-sync/config --json '{"path":"qa-other-org-free"}' --expect 200 --check path eq qa-other-org-free
-  control-automation exec -- python3 -c 'import os, sqlite3; db = sqlite3.connect(os.environ["AUTOMATION_VERIFY_RUN"] + "/private/automations.db", timeout=10); db.execute("DELETE FROM automation_git_sync_org_config WHERE org_id = ?", ("00000000000000000000000000000f13",)); db.commit()'
+  control-automation exec -- python3 -c 'import os, sqlite3; db = sqlite3.connect(os.environ["AUTOMATION_VERIFY_RUN"] + "/private/automations.db", timeout=10); db.execute("DELETE FROM automation_git_sync_remote WHERE org_id = ?", ("00000000000000000000000000000f13",)); db.commit()'
   control-automation api PUT /v1/git-sync/config --json '{"path":null}' --expect 200 --check path eq automations
-  control-automation state sql "SELECT count(*) AS n FROM automation_git_sync_org_config" --check rows.0.n eq 1
+  control-automation state sql "SELECT count(*) AS n FROM automation_git_sync_remote" --check rows.0.n eq 1
   control-automation api GET /v1/git-sync/status --check repo_url eq "$URL"
   ```
   The other org stores the URL upper-cased with a trailing slash and this one
   sends it without `.git`; both normalize to the same identity, so the save
   is refused and the stored URL is unchanged. A different path does not
   collide. The seeded row is removed before the path goes back to
-  `automations` (with it still there, that revert is a 409 too).
+  `automations` (with it still there, that revert is a 409 too). The same
+  409 between two remotes of one org is driven in `F18.repo-conflict`.
 - **Partial updates (`F13.config-partial`).** Only the named field changes; `null` and blank revert.
   ```sh
   control-automation api PUT /v1/git-sync/config --json '{"branch":"qa-dev"}' --expect 200 --check branch eq qa-dev --check repo_url eq "$URL" --check path eq automations --save F13.config-partial/branch
@@ -195,9 +205,9 @@ Preconditions:
   ```sh
   control-automation api PUT /v1/git-sync/config --json '{"token":"qa-git-token-5150"}' --expect 200 --check token missing --check encryption_enabled eq false --save F13.secrets-at-rest/put
   control-automation exec --reject-output qa-git-token-5150 -- sh -c 'curl -s -H "X-Session-API-Key: $AUTOMATION_API_KEY" "$AUTOMATION_API_URL/v1/git-sync/status"'
-  control-automation state sql "SELECT json_extract(overrides, '\$.git_sync_token') AS t, instr(overrides, 'qa-git-token-5150') AS leak FROM automation_git_sync_org_config" --raw --check rows.0.t matches '^gAAAAA' --check rows.0.leak eq 0
+  control-automation state sql "SELECT json_extract(overrides, '\$.git_sync_token') AS t, instr(overrides, 'qa-git-token-5150') AS leak FROM automation_git_sync_remote" --raw --check rows.0.t matches '^gAAAAA' --check rows.0.leak eq 0
   control-automation api PUT /v1/git-sync/config --json '{"token":null}' --expect 200
-  control-automation state sql "SELECT json_extract(overrides, '\$.git_sync_token') AS t FROM automation_git_sync_org_config" --check rows.0.t eq null
+  control-automation state sql "SELECT json_extract(overrides, '\$.git_sync_token') AS t FROM automation_git_sync_remote" --check rows.0.t eq null
   ```
 - **First sync (`F13.sync-first`).** Fire and forget, then poll.
   Requires: `F13.config-enable`
@@ -207,13 +217,14 @@ Preconditions:
   HEAD_SHA=$(git -C "$B" rev-parse main)
   control-automation api GET /v1/git-sync/status --check last_synced_commit eq "$HEAD_SHA"
   control-automation api POST /v1/git-sync/check --json '{}' --expect 200 --check ok eq true --check branch_exists eq true
-  test "$(git -C "$AUTOMATION_VERIFY_RUN/workspaces/git-sync" remote get-url origin)" = "$URL"
-  test "$(git -C "$AUTOMATION_VERIFY_RUN/workspaces/git-sync" rev-parse HEAD)" = "$HEAD_SHA"
+  R1=$(control-automation api GET /v1/git-sync/remotes --check remotes len-eq 1 --check remotes.0.is_default eq true --field remotes.0.id)
+  test "$(git -C "$AUTOMATION_VERIFY_RUN/workspaces/git-sync/$R1" remote get-url origin)" = "$URL"
+  test "$(git -C "$AUTOMATION_VERIFY_RUN/workspaces/git-sync/$R1" rev-parse HEAD)" = "$HEAD_SHA"
   test ! -e "$AUTOMATION_VERIFY_RUN/workspaces/.git-sync-secret-key"
   ```
   The remote had no `main` before; the cycle created it. The checkout is the
-  run's `workspaces/git-sync`, and no key file was generated because
-  `AUTOMATION_KV_SECRET` wraps the stored secrets.
+  run's `workspaces/git-sync/<default remote id>`, and no key file was
+  generated because `AUTOMATION_KV_SECRET` wraps the stored secrets.
 - **Export layout (`F13.export-layout`).**
   Requires: `F13.sync-first`
   ```sh
@@ -366,7 +377,7 @@ Preconditions:
   ```sh
   N=$(control-automation state sql "SELECT count(*) AS n FROM automation_git_sync_state" --field rows.0.n)
   control-automation api PUT /v1/git-sync/config --json '{"encryption_key":"qa-repo-key-0123456789abcdef"}' --expect 200 --check encryption_enabled eq true --check dirty_count eq "$N" --save F13.encryption/put
-  control-automation state sql "SELECT json_extract(overrides, '\$.git_sync_encryption_key') AS k, instr(overrides, 'qa-repo-key-0123456789abcdef') AS leak FROM automation_git_sync_org_config" --raw --check rows.0.k matches '^gAAAAA' --check rows.0.leak eq 0
+  control-automation state sql "SELECT json_extract(overrides, '\$.git_sync_encryption_key') AS k, instr(overrides, 'qa-repo-key-0123456789abcdef') AS leak FROM automation_git_sync_remote" --raw --check rows.0.k matches '^gAAAAA' --check rows.0.leak eq 0
   PREV=$(control-automation api GET /v1/git-sync/status --field last_synced_at)
   control-automation api POST /v1/git-sync/sync --expect 202 --check triggered eq true
   control-automation api GET /v1/git-sync/status --until-ok 60 --check last_synced_at ne "$PREV" --check sync_in_progress eq false --check dirty_count eq 0 --check last_error eq null
@@ -452,17 +463,20 @@ Preconditions:
   value. `--field last_synced_at` exits 1 while it is null.
 - A failed cycle keeps the previous `last_synced_at`; only `last_error` and
   `last_error_at` move. Both clear on the next success.
-- The workdir is `$AUTOMATION_WORKSPACE_BASE/git-sync` (the run's
-  `workspaces/git-sync`) unless `AUTOMATION_GIT_SYNC_LOCAL_WORKDIR` is set.
-  In local mode there is no per-org subdirectory, and the same checkout is
-  reused with `git remote set-url` when the repo URL changes; that is why the
-  recipes can switch to a missing or hung remote and back.
+- The workdir is `$AUTOMATION_WORKSPACE_BASE/git-sync/<remote id>` (the
+  run's `workspaces/git-sync/<remote id>`), with the root taken from
+  `AUTOMATION_GIT_SYNC_LOCAL_WORKDIR` when set. A checkout made before
+  remotes existed (at the root itself) is moved under the default remote's
+  id on its first cycle. The same checkout is reused with `git remote
+  set-url` when the repo URL changes; that is why the recipes can switch to
+  a missing or hung remote and back.
 - The import is diff-scoped: only directories changed between
   `last_synced_commit` and the new HEAD are read, except on the first cycle
   or when the diff fails. A directory changed by hand in the workdir, or
   committed before the last sync, is not re-imported.
-- New automations from git run as the user who last saved the config
-  (`configured_by_user_id`); in local mode that is always the local user.
+- New automations from git run as the user who last saved the remote's
+  config (`configured_by_user_id`); in local mode that is always the local
+  user.
   Anything pushed to the repo becomes a runnable automation, so repo write
   access is admin access.
 - An imported directory needs `tarball/` contents or a valid external
@@ -477,10 +491,11 @@ Preconditions:
   unreachable here: `launch` sets `AUTOMATION_KV_SECRET`, which wraps the
   secrets. Local mode without any secret falls back to a 0600 key file at
   `$AUTOMATION_WORKSPACE_BASE/.git-sync-secret-key`.
-- The 409 repo-conflict path needs a second org, which local mode cannot
-  create through the API; `F13.repo-conflict` seeds one row directly in the
-  run's SQLite file and removes it afterwards. That seeded row is also read by
-  the background loop (it is skipped, interval 0).
+- The cross-org 409 repo-conflict path needs a second org, which local mode
+  cannot create through the API; `F13.repo-conflict` seeds one remote row
+  directly in the run's SQLite file and removes it afterwards. That seeded
+  row is also read by the background loop (it is skipped, interval 0). The
+  same-org case needs only a second remote (`F18.repo-conflict`).
 - `ls-remote` in `/check` passes `--` before the URL, but `git clone` (first
   cycle) and `git remote set-url` do not, so a `repo_url` starting with `-`
   could be read as an option there. Not exercised here; a candidate for a
