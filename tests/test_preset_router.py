@@ -2405,3 +2405,109 @@ class TestCreateAutomationFromPlugin:
             assert config[0]["source"] == "github:owner/minimal-plugin"
             # No ref or repo_path since they were None
             assert "ref" not in config[0]
+
+
+class TestPromptAutomationAgentProfile:
+    """A prompt automation may run as an agent profile (an ACP agent such as
+    Claude Code or Codex) instead of around a model profile."""
+
+    @pytest.fixture(autouse=True)
+    def file_store_override(self):
+        from collections.abc import AsyncIterator
+        from unittest.mock import AsyncMock
+
+        from openhands.automation.app import app
+        from openhands.automation.storage import get_file_store
+
+        store = MagicMock()
+
+        async def write_stream(
+            path: str,
+            stream: AsyncIterator[bytes],
+            max_size: int | None = None,
+            content_type: str = "application/octet-stream",
+        ) -> int:
+            size = 0
+            async for chunk in stream:
+                size += len(chunk)
+            return size
+
+        store.write_stream = AsyncMock(side_effect=write_stream)
+        store.delete = MagicMock()
+        app.dependency_overrides[get_file_store] = lambda: store
+        yield
+        app.dependency_overrides.pop(get_file_store, None)
+
+    @pytest.fixture
+    def profile_exists(self, monkeypatch):
+        """The caller's profile check, which otherwise asks the app server."""
+        from unittest.mock import AsyncMock
+
+        import openhands.automation.preset_router as preset_router
+
+        check = AsyncMock()
+        monkeypatch.setattr(preset_router, "ensure_agent_profile_exists", check)
+        return check
+
+    async def test_stores_the_profile_and_no_model(
+        self, async_client, async_session, profile_exists
+    ):
+        profile_id = uuid.uuid4()
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "Nightly review as Codex",
+                "prompt": "Review yesterday's merges.",
+                "agent_profile_id": str(profile_id),
+                "trigger": {"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            },
+        )
+
+        assert response.status_code == 201, response.text
+        body = response.json()
+        assert body["agent_profile_id"] == str(profile_id)
+        # The profile owns the model: nothing is resolved from the caller's
+        # active LLM profile either.
+        assert body["model"] is None
+        profile_exists.assert_awaited_once()
+        assert profile_exists.await_args.args[0] == profile_id
+
+        automation = await async_session.get(Automation, uuid.UUID(body["id"]))
+        assert automation is not None
+        assert automation.agent_profile_id == profile_id
+        assert automation.model is None
+
+    async def test_refuses_a_profile_together_with_a_model(
+        self, async_client, profile_exists
+    ):
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "Both",
+                "prompt": "Do the thing.",
+                "agent_profile_id": str(uuid.uuid4()),
+                "model": "fast-profile",
+                "trigger": {"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            },
+        )
+
+        assert response.status_code == 422
+        assert "already specifies the model" in response.json()["detail"]
+        profile_exists.assert_not_awaited()
+
+    async def test_without_a_profile_the_model_resolves_as_before(
+        self, async_client, profile_exists
+    ):
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "Plain",
+                "prompt": "Do the thing.",
+                "model": "fast-profile",
+                "trigger": {"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            },
+        )
+
+        assert response.status_code == 201, response.text
+        assert response.json()["agent_profile_id"] is None
+        assert response.json()["model"] == "fast-profile"
