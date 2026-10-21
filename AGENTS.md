@@ -75,11 +75,11 @@ automation/
 │       ├── webhook_router.py   # Custom webhook CRUD
 │       ├── backends/           # Execution backends (Cloud, Local)
 │       ├── event_schemas/      # Typed event payloads (GitHub, Jira DC, Bitbucket DC, custom)
-│       ├── git_sync/           # Bidirectional git sync, one repo per org (see below)
+│       ├── git_sync/           # Bidirectional git sync, any number of repos ("remotes") per org
 │       │   ├── client.py       # Async `git` CLI wrapper (clone/pull/commit/push)
-│       │   ├── config_override.py  # Per-org runtime config overrides
-│       │   ├── loop.py         # Sync cycle, background loop, mark_git_sync_dirty hook
-│       │   ├── router.py       # Git sync status/trigger API
+│       │   ├── config_override.py  # Per-remote rows, runtime config, default remote
+│       │   ├── loop.py         # Sync cycle per remote, background loop, mark_git_sync_dirty hook
+│       │   ├── router.py       # Remotes/assignments API plus the legacy single-repo endpoints
 │       │   ├── schemas.py      # Git sync request/response schemas
 │       │   ├── secret_store.py # At-rest encryption for org tokens/keys
 │       │   └── serializer.py   # Automation <-> git file-tree (de)serializer

@@ -1,12 +1,13 @@
-"""Bidirectional git sync for automations, one repo per organization.
+"""Bidirectional git sync for automations: any number of repositories per org.
 
 Submodules:
     client.py           Async wrapper around the `git` CLI
     serializer.py       Automation <-> git file-tree (de)serializer, encryption
     loop.py             Sync cycle, background loop, mark_git_sync_dirty hook
-    config_override.py  Runtime config overrides (PUT /v1/git-sync/config)
+    config_override.py  Per-remote runtime config (the /v1/git-sync/remotes API)
     secret_store.py     At-rest encryption for the stored token and key
-    router.py           FastAPI status/config/trigger API (/v1/git-sync/*)
+    router.py           FastAPI remotes/assignments API plus the legacy
+                        single-repo status/config/check/sync endpoints
     schemas.py          Request/response schemas for router.py
 """
 
@@ -15,6 +16,7 @@ from openhands.automation.git_sync.loop import (
     git_sync_loop,
     is_git_sync_active,
     mark_git_sync_dirty,
+    reassign_automation,
     run_sync_cycle,
 )
 
@@ -29,5 +31,6 @@ __all__ = [
     "git_sync_router",
     "is_git_sync_active",
     "mark_git_sync_dirty",
+    "reassign_automation",
     "run_sync_cycle",
 ]

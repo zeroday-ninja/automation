@@ -23,6 +23,7 @@ from openhands.automation.git_sync.loop import (
 from openhands.automation.git_sync.serializer import deserialize_automation
 from openhands.automation.models import (
     Automation,
+    AutomationGitSyncRemote,
     AutomationGitSyncState,
     AutomationState,
     Base,
@@ -34,6 +35,18 @@ from openhands.automation.utils.time import utcnow
 
 TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
+TEST_REMOTE_ID = uuid.UUID("0f0e0d0c-0b0a-4908-8706-050403020100")
+
+
+async def _ensure_remote(session: AsyncSession) -> None:
+    """The remote an import is attributed to; imports always come from one."""
+    if await session.get(AutomationGitSyncRemote, TEST_REMOTE_ID) is None:
+        session.add(
+            AutomationGitSyncRemote(
+                id=TEST_REMOTE_ID, org_id=TEST_ORG_ID, is_default=True
+            )
+        )
+        await session.flush()
 
 
 @pytest.fixture
@@ -67,11 +80,13 @@ async def _import_automation(
     files = {"automation.yaml": yaml.safe_dump(fields).encode()}
     deserialized = deserialize_automation(files)
     assert deserialized is not None
+    await _ensure_remote(session)
     # Match the import loop's savepoint: rejected input cannot leave partial rows.
     async with session.begin_nested():
         await _create_automation_from_git(
             session,
             _Owner(TEST_USER_ID, TEST_ORG_ID),
+            TEST_REMOTE_ID,
             "git-state-regression",
             deserialized,
             files,
@@ -145,11 +160,13 @@ async def test_invalid_state_metadata_rejects_before_tarball_upload(
     assert deserialized is not None
     assert deserialized.tarball_bytes is not None
 
+    await _ensure_remote(state_session)
     with pytest.raises(ValueError, match="enabled must be true"):
         async with state_session.begin_nested():
             await _create_automation_from_git(
                 state_session,
                 _Owner(TEST_USER_ID, TEST_ORG_ID),
+                TEST_REMOTE_ID,
                 "git-state-regression",
                 deserialized,
                 files,

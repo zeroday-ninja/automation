@@ -15,10 +15,10 @@ from openhands.automation.config import (
     clear_config_cache,
 )
 from openhands.automation.git_sync import SyncCycleResult
+from openhands.automation.git_sync.config_override import get_default_remote
 from openhands.automation.git_sync.router import _background_sync_tasks
 from openhands.automation.models import (
     Automation,
-    AutomationGitSyncOrgConfig,
     AutomationGitSyncState,
 )
 
@@ -517,7 +517,7 @@ class TestGitSyncSecretsAtRest:
         )
         assert response.status_code == 200
 
-        row = await async_session.get(AutomationGitSyncOrgConfig, ORG_ID)
+        row = await get_default_remote(async_session, ORG_ID)
         assert row is not None
         assert "ghp_supersecrettoken" not in row.overrides
         assert "the-key" not in row.overrides
@@ -647,7 +647,7 @@ class TestOrgScoping:
             "/api/automation/v1/git-sync/config",
             json={"repo_url": "https://example.com/repo.git", "token": "old-token"},
         )
-        row = await async_session.get(AutomationGitSyncOrgConfig, ORG_ID)
+        row = await get_default_remote(async_session, ORG_ID)
         assert row is not None
         row.consecutive_auth_failures = 5
         await async_session.commit()
@@ -667,7 +667,7 @@ class TestOrgScoping:
             "/api/automation/v1/git-sync/config", json={"branch": "develop"}
         )
 
-        row = await async_session.get(AutomationGitSyncOrgConfig, ORG_ID)
+        row = await get_default_remote(async_session, ORG_ID)
         assert row is not None
         assert row.configured_by_user_id == mock_authenticated_user.user_id
 

@@ -19,6 +19,7 @@ from sqlalchemy import (
     String,
     Text,
     Uuid,
+    false,
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -789,8 +790,9 @@ class AutomationKV(Base):
 class AutomationGitSyncState(Base):
     """Per-automation git sync bookkeeping, one row per synced automation.
 
-    See ``openhands/automation/git_sync/``. Tracks the repo directory name and
-    whether the DB side has changed since it was last written to git.
+    See ``openhands/automation/git_sync/``. Tracks which of the org's remotes
+    the automation syncs to, its directory name there, and whether the DB side
+    has changed since it was last written to git.
 
     ``dirty`` is a plain boolean column, not a JSON field, so the sync loop can
     query ``WHERE dirty = true`` identically on SQLite and PostgreSQL.
@@ -808,9 +810,22 @@ class AutomationGitSyncState(Base):
     # rows without a join, and so the slug uniqueness below is per org.
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
 
+    # The remote this automation syncs to. NULL means unassigned: it is
+    # adopted by the org's default remote on that remote's next cycle (see
+    # `_backfill_missing_states` in git_sync/loop.py). Cleared, not cascaded,
+    # when the remote is deleted, so the automation survives and is picked up
+    # by whichever remote is the default next.
+    remote_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("automation_git_sync_remote.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     # Directory name within the sync path, e.g. "automations/{slug}/" in the
-    # repo. Stable once assigned. Unique per org, not globally: each org syncs
-    # to its own repo, so two orgs may both have a "daily-standup".
+    # repo. Stable once assigned. Unique per remote, not per org or globally:
+    # each remote is its own repo (or its own path in one), so two project
+    # repos may both carry a "nightly-tests".
     slug: Mapped[str] = mapped_column(String(255), nullable=False)
 
     # SHA-256 of the last-synced content (metadata + tarball files), used to
@@ -840,18 +855,23 @@ class AutomationGitSyncState(Base):
     )
 
     __table_args__ = (
-        Index("ix_automation_git_sync_state_org_slug", "org_id", "slug", unique=True),
+        Index(
+            "ix_automation_git_sync_state_remote_slug",
+            "remote_id",
+            "slug",
+            unique=True,
+        ),
     )
 
 
-class AutomationGitSyncOrgConfig(Base):
-    """One organization's git sync: runtime config plus sync bookkeeping.
+class AutomationGitSyncRemote(Base):
+    """One git repository an organization syncs automations to and from.
 
-    See ``openhands/automation/git_sync/``. Sync is org-scoped -- each org
-    mirrors its own automations to its own repo -- so everything that used to
-    be service-wide (the config override blob and the last commit/run/error)
-    lives here, keyed by ``org_id``. Local mode has exactly one row, for the
-    deterministic local org from ``auth.py``.
+    See ``openhands/automation/git_sync/``. An org may have any number of
+    remotes -- one per project repository, say -- and each automation syncs
+    to at most one of them (``AutomationGitSyncState.remote_id``). Exactly one
+    remote per org may be the default: it is where automations that were
+    never assigned to a remote end up.
 
     ``overrides`` is the JSON blob of runtime config saved from the Git Sync
     page (``git_sync/config_override.py``), merged over the env defaults at
@@ -859,14 +879,26 @@ class AutomationGitSyncOrgConfig(Base):
 
     ``sync_started_at`` doubles as a cross-replica lease: a cycle claims it
     with a conditional UPDATE and clears it when done, so two replicas never
-    sync the same org at once and every replica reports the same
+    sync the same remote at once and every replica reports the same
     ``sync_in_progress``. A crash mid-cycle leaves it set; the loop treats it
-    as expired after its lease TTL rather than blocking the org forever.
+    as expired after its lease TTL rather than blocking the remote forever.
     """
 
-    __tablename__ = "automation_git_sync_org_config"
+    __tablename__ = "automation_git_sync_remote"
 
-    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+
+    # Display name chosen by the operator; blank means "show the repo URL".
+    label: Mapped[str] = mapped_column(
+        String(255), nullable=False, default="", server_default=""
+    )
+    # Where unassigned automations go. At most one per org (partial unique
+    # index below); an org with no default leaves them unsynced.
+    is_default: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+
     overrides: Mapped[str] = mapped_column(
         Text, nullable=False, default="{}", server_default="{}"
     )
@@ -905,5 +937,42 @@ class AutomationGitSyncOrgConfig(Base):
         DateTime(timezone=True),
         server_default=text("CURRENT_TIMESTAMP"),
         onupdate=utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_automation_git_sync_remote_org_default",
+            "org_id",
+            unique=True,
+            postgresql_where=text("is_default"),
+            sqlite_where=text("is_default"),
+        ),
+    )
+
+
+class AutomationGitSyncRemoval(Base):
+    """A directory a remote's next export must delete from its repository.
+
+    Written when an automation is moved to another remote: its state row now
+    points at the new remote, so nothing else remembers that the old repo
+    still carries ``{path}/{slug}/``. The old remote's next cycle removes the
+    generated files there and deletes this row. Cascades with the remote,
+    since a deleted remote's repo is no longer ours to edit.
+    """
+
+    __tablename__ = "automation_git_sync_removal"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    remote_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automation_git_sync_remote.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    slug: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )

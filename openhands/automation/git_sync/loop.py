@@ -1,4 +1,9 @@
-"""Bidirectional git sync for automations, one repo per organization.
+"""Bidirectional git sync for automations: any number of repositories per org.
+
+Each *remote* (`AutomationGitSyncRemote`) is one repository, branch and path.
+An automation syncs to at most one remote (`AutomationGitSyncState.remote_id`);
+one it was never assigned to is adopted by the org's default remote on that
+remote's next cycle.
 
 Conflict policy: a `dirty` automation -- one changed via the API since its last
 sync -- wins over a conflicting git-side change in the same cycle. The VM is
@@ -42,7 +47,8 @@ from openhands.automation.git_sync.config_override import (
     base_git_sync_settings,
     effective_interval_for,
     effective_settings_for,
-    get_or_create_org_config,
+    get_default_remote,
+    get_or_create_default_remote,
 )
 from openhands.automation.git_sync.serializer import (
     METADATA_FILENAME,
@@ -60,7 +66,8 @@ from openhands.automation.git_sync.serializer import (
 )
 from openhands.automation.models import (
     Automation,
-    AutomationGitSyncOrgConfig,
+    AutomationGitSyncRemote,
+    AutomationGitSyncRemoval,
     AutomationGitSyncState,
     AutomationState,
     TarballUpload,
@@ -95,8 +102,8 @@ logger = logging.getLogger("automation.git_sync")
 # before a UI-set interval takes effect. Each tick is one indexed metadata read.
 _IDLE_POLL_SECONDS: Final[int] = 15
 
-# A crashed cycle leaves its org's lease set. Past this age it reads as expired
-# so the org isn't blocked forever. Generous relative to a cycle, which is a
+# A crashed cycle leaves its remote's lease set. Past this age it reads as
+# expired so the remote isn't blocked forever. Generous relative to a cycle, which is a
 # handful of git commands each bounded by git_sync_git_timeout_seconds.
 _SYNC_LEASE_MIN_SECONDS: Final[int] = 300
 _SYNC_LEASE_TIMEOUT_MULTIPLIER: Final[int] = 5
@@ -107,11 +114,11 @@ _TRIGGER_ADAPTER: Final[TypeAdapter[Trigger]] = TypeAdapter(Trigger)
 def is_git_sync_active() -> bool:
     """Whether git sync is on from env alone: a repo is set and not paused.
 
-    Reads only boot-time env config, so it says nothing about an org's
-    runtime-configured repo; and outside local mode the env-level repo is
+    Reads only boot-time env config, so it says nothing about a remote
+    configured at runtime; and outside local mode the env-level repo is
     ignored (see `base_git_sync_settings`), so this is False there. Callers
-    needing an org's overrides must resolve the effective settings themselves,
-    as the router does.
+    needing a remote's overrides must resolve the effective settings
+    themselves, as the router does.
     """
     return base_git_sync_settings().enabled
 
@@ -119,12 +126,13 @@ def is_git_sync_active() -> bool:
 @dataclass
 class SyncCycleResult:
     head: str | None
+    remote_id: uuid.UUID | None = field(default=None)
     imported: int = field(default=0)
     deleted_in_db: int = field(default=0)
     exported: int = field(default=0)
     deleted_in_git: int = field(default=0)
     pushed_commit: str | None = field(default=None)
-    # True when another cycle held the org's lease, so nothing ran.
+    # True when another cycle held the remote's lease, so nothing ran.
     skipped: bool = field(default=False)
 
 
@@ -143,6 +151,9 @@ async def mark_git_sync_dirty(session: AsyncSession, automation: Automation) -> 
     effective `enabled` would drop every edit made while sync is paused; both
     silently lose changes a later cycle should export. An org that never
     configures sync just carries one small state row per automation.
+
+    A new automation is assigned to the org's default remote, if it has one;
+    otherwise its row stays unassigned until a default exists and adopts it.
     """
     try:
         async with session.begin_nested():
@@ -168,10 +179,17 @@ async def _mark_git_sync_dirty_inner(
         state.dirty = True
         return
 
-    # A UNIQUE collision (two automations with the same name) rolls back just
-    # this savepoint; retry once with an id-suffixed slug, guaranteed free.
-    base_slug = compute_slug(automation.name, automation.id, taken=set())
-    fallback_slug = compute_slug(automation.name, automation.id, taken={base_slug})
+    default = await get_default_remote(session, automation.org_id)
+    remote_id = default.id if default is not None else None
+    taken = await slugs_taken_by(session, remote_id, automation.org_id)
+
+    # A UNIQUE collision (a concurrent create with the same name) rolls back
+    # just this savepoint; retry once with an id-suffixed slug, guaranteed
+    # free.
+    base_slug = compute_slug(automation.name, automation.id, taken=taken)
+    fallback_slug = compute_slug(
+        automation.name, automation.id, taken=taken | {base_slug}
+    )
     for slug in (base_slug, fallback_slug):
         try:
             async with session.begin_nested():
@@ -179,6 +197,7 @@ async def _mark_git_sync_dirty_inner(
                     AutomationGitSyncState(
                         automation_id=automation.id,
                         org_id=automation.org_id,
+                        remote_id=remote_id,
                         slug=slug,
                         dirty=True,
                     )
@@ -196,25 +215,104 @@ async def _mark_git_sync_dirty_inner(
     )
 
 
+async def slugs_taken_by(
+    session: AsyncSession, remote_id: uuid.UUID | None, org_id: uuid.UUID
+) -> set[str]:
+    """Directory names already used under `remote_id`.
+
+    Unassigned rows (`None`) share one namespace per org: the database can't
+    make NULL-keyed slugs unique, and keeping them distinct here means the
+    default remote adopts them later without having to rename any.
+    """
+    where = (
+        AutomationGitSyncState.remote_id == remote_id
+        if remote_id is not None
+        else (AutomationGitSyncState.org_id == org_id)
+        & AutomationGitSyncState.remote_id.is_(None)
+    )
+    return set(
+        (await session.execute(select(AutomationGitSyncState.slug).where(where)))
+        .scalars()
+        .all()
+    )
+
+
+async def reassign_automation(
+    session: AsyncSession,
+    state: AutomationGitSyncState,
+    remote: AutomationGitSyncRemote,
+) -> None:
+    """Move an automation to `remote`.
+
+    The previous remote (if any) gets a removal for the directory it still
+    carries, so its next cycle deletes it from that repo; the new remote
+    exports the automation on its next cycle. The slug follows along unless
+    the new remote already uses it, in which case it gets the id suffix.
+    """
+    if state.remote_id == remote.id:
+        return
+    if state.remote_id is not None:
+        session.add(
+            AutomationGitSyncRemoval(remote_id=state.remote_id, slug=state.slug)
+        )
+    taken = await slugs_taken_by(session, remote.id, remote.org_id)
+    if state.slug in taken:
+        automation = await session.get(Automation, state.automation_id)
+        name = automation.name if automation is not None else state.slug
+        state.slug = compute_slug(name, state.automation_id, taken=taken)
+    state.remote_id = remote.id
+    state.dirty = True
+    state.content_hash = None
+    await session.flush()
+
+
 # --- Filesystem helpers ------------------------------------------------------
 
 
-def _resolve_workdir(
-    git_settings: GitSyncSettings, service_settings: ServiceSettings, org_id: uuid.UUID
+def _workdir_root(
+    git_settings: GitSyncSettings, service_settings: ServiceSettings
 ) -> Path:
-    """Where this org's checkout lives.
-
-    Local mode has one org and keeps the historical layout, so an existing
-    checkout is reused. Elsewhere each org gets its own directory: the pod's
-    disk is shared by every org it syncs.
-    """
     if git_settings.git_sync_local_workdir:
-        root = Path(git_settings.git_sync_local_workdir)
-    else:
-        root = Path(service_settings.workspace_base) / "git-sync"
-    if service_settings.is_local_mode:
-        return root
-    return root / str(org_id)
+        return Path(git_settings.git_sync_local_workdir)
+    return Path(service_settings.workspace_base) / "git-sync"
+
+
+def _relocate_legacy_checkout(legacy: Path, target: Path) -> None:
+    """Move a checkout made before remotes existed into its remote's directory.
+
+    `target` sits *inside* `legacy`, so the checkout is first moved aside and
+    then nested back under its own old root. Keeps an unpushed commit a
+    previous cycle may have left behind, which a fresh clone would lose.
+    """
+    if target.exists() or not (legacy / ".git").is_dir():
+        return
+    staging = legacy.with_name(f"{legacy.name}.relocating")
+    if staging.exists():
+        shutil.rmtree(staging)
+    legacy.rename(staging)
+    legacy.mkdir(parents=True, exist_ok=True)
+    staging.rename(target)
+    logger.info("Moved the pre-remotes git-sync checkout %s to %s", legacy, target)
+
+
+def _resolve_workdir(
+    git_settings: GitSyncSettings,
+    service_settings: ServiceSettings,
+    remote: AutomationGitSyncRemote,
+) -> Path:
+    """Where this remote's checkout lives: one directory per remote, since a
+    process may sync many repositories.
+
+    Before remotes existed the one checkout lived at the root itself (local
+    mode) or under the org id (cloud). The default remote inherits that
+    checkout the first time it is resolved, so the switch costs no re-clone.
+    """
+    root = _workdir_root(git_settings, service_settings)
+    workdir = root / str(remote.id)
+    if remote.is_default:
+        legacy = root if service_settings.is_local_mode else root / str(remote.org_id)
+        _relocate_legacy_checkout(legacy, workdir)
+    return workdir
 
 
 def _read_directory_files(directory: Path) -> dict[str, bytes]:
@@ -288,19 +386,19 @@ class _Owner(NamedTuple):
     org_id: uuid.UUID
 
 
-def _import_owner(org_config: AutomationGitSyncOrgConfig) -> _Owner | None:
-    """Who owns automations created from git for this org, if anyone can.
+def _import_owner(remote: AutomationGitSyncRemote) -> _Owner | None:
+    """Who owns automations created from git for this remote, if anyone can.
 
-    The admin who last saved the org's Git Sync config: an automation runs as
-    its owner, and in cloud mode that means minting the owner's API key, so it
+    The admin who last saved the remote's config: an automation runs as its
+    owner, and in cloud mode that means minting the owner's API key, so it
     has to be a real member of the org. Local mode has no such user and keeps
-    its deterministic local identity. `None` -- an org row never saved from
-    the UI, outside local mode -- makes the import skip new directories (see
+    its deterministic local identity. `None` -- a remote never saved from the
+    UI, outside local mode -- makes the import skip new directories (see
     `_create_automation_from_git`); already-synced automations keep their
     owner and update as usual.
     """
-    if org_config.configured_by_user_id is not None:
-        return _Owner(org_config.configured_by_user_id, org_config.org_id)
+    if remote.configured_by_user_id is not None:
+        return _Owner(remote.configured_by_user_id, remote.org_id)
     if get_config().service.is_local_mode:
         local = _get_local_user()
         return _Owner(local.user_id, local.org_id)
@@ -571,6 +669,7 @@ async def _validate_and_resolve_fields(
 async def _create_automation_from_git(
     session: AsyncSession,
     owner: _Owner | None,
+    remote_id: uuid.UUID,
     slug: str,
     deserialized: DeserializedAutomation,
     dir_files: dict[str, bytes],
@@ -595,6 +694,7 @@ async def _create_automation_from_git(
         AutomationGitSyncState(
             automation_id=automation.id,
             org_id=owner.org_id,
+            remote_id=remote_id,
             slug=slug,
             content_hash=compute_content_hash(dir_files),
             last_synced_commit=head,
@@ -706,7 +806,7 @@ def _list_slug_directories(sync_root: Path) -> dict[str, Path]:
 
 async def _import_from_git(
     session: AsyncSession,
-    org_id: uuid.UUID,
+    remote: AutomationGitSyncRemote,
     owner: _Owner | None,
     workdir: Path,
     sync_root: Path,
@@ -734,7 +834,7 @@ async def _import_from_git(
         (
             await session.execute(
                 select(AutomationGitSyncState).where(
-                    AutomationGitSyncState.org_id == org_id
+                    AutomationGitSyncState.remote_id == remote.id
                 )
             )
         )
@@ -768,6 +868,7 @@ async def _import_from_git(
                     await _create_automation_from_git(
                         session,
                         owner,
+                        remote.id,
                         slug,
                         deserialized,
                         dir_files,
@@ -823,7 +924,7 @@ async def _import_from_git(
 
 async def _handle_path_change(
     session: AsyncSession,
-    org_id: uuid.UUID,
+    remote: AutomationGitSyncRemote,
     workdir: Path,
     old_path: str,
     new_path: str,
@@ -844,7 +945,7 @@ async def _handle_path_change(
     """
     await session.execute(
         update(AutomationGitSyncState)
-        .where(AutomationGitSyncState.org_id == org_id)
+        .where(AutomationGitSyncState.remote_id == remote.id)
         .values(dirty=True)
     )
 
@@ -868,18 +969,29 @@ async def _handle_path_change(
 # --- Export (DB -> git) -------------------------------------------------------
 
 
-async def _backfill_missing_states(session: AsyncSession, org_id: uuid.UUID) -> int:
-    """Create state rows for the org's live automations that never had one.
+async def _backfill_missing_states(
+    session: AsyncSession, remote: AutomationGitSyncRemote
+) -> int:
+    """Give the org's unassigned live automations to the default remote.
 
-    `mark_git_sync_dirty` fires only on an API create/update/delete, so
-    automations predating git sync had no state row -- and the export only
-    reads dirty rows. The cycle reported success against an empty repo, and an
-    automation appeared only if someone edited it again; a restore from that
-    repo silently lost the rest.
+    Only the default adopts: every other remote holds exactly the automations
+    imported from it or moved to it. Two kinds of automation are unassigned:
 
-    New rows start dirty so this cycle exports them. Runs every cycle, so the
-    steady state is one indexed NOT EXISTS returning nothing.
+    - ones with no state row at all. `mark_git_sync_dirty` fires only on an
+      API create/update/delete, so automations predating git sync had none --
+      and the export only reads state rows. The cycle reported success against
+      an empty repo, and an automation appeared only if someone edited it
+      again; a restore from that repo silently lost the rest.
+    - ones whose row has no remote: created while the org had no default, or
+      left behind by a deleted remote.
+
+    Adopted rows are dirty so this cycle exports them. Runs every cycle, so
+    the steady state is two indexed queries returning nothing.
     """
+    if not remote.is_default:
+        return 0
+    org_id = remote.org_id
+
     missing = (
         (
             await session.execute(
@@ -895,36 +1007,90 @@ async def _backfill_missing_states(session: AsyncSession, org_id: uuid.UUID) -> 
         .scalars()
         .all()
     )
-    if not missing:
-        return 0
-
-    taken = set(
+    unassigned = (
         (
             await session.execute(
-                select(AutomationGitSyncState.slug).where(
-                    AutomationGitSyncState.org_id == org_id
+                select(AutomationGitSyncState).where(
+                    AutomationGitSyncState.org_id == org_id,
+                    AutomationGitSyncState.remote_id.is_(None),
                 )
             )
         )
         .scalars()
         .all()
     )
+    if not missing and not unassigned:
+        return 0
+
+    taken = await slugs_taken_by(session, remote.id, org_id)
     for automation in missing:
         slug = compute_slug(automation.name, automation.id, taken=taken)
         taken.add(slug)
         session.add(
             AutomationGitSyncState(
-                automation_id=automation.id, org_id=org_id, slug=slug, dirty=True
+                automation_id=automation.id,
+                org_id=org_id,
+                remote_id=remote.id,
+                slug=slug,
+                dirty=True,
             )
         )
+    for state in unassigned:
+        if state.slug in taken:
+            automation = await session.get(Automation, state.automation_id)
+            name = automation.name if automation is not None else state.slug
+            state.slug = compute_slug(name, state.automation_id, taken=taken)
+        taken.add(state.slug)
+        state.remote_id = remote.id
+        state.dirty = True
 
     await session.flush()
+    adopted = len(missing) + len(unassigned)
     logger.info(
-        "Backfilled %d automation(s) with no git-sync state; they will be "
+        "Default remote %s adopted %d unassigned automation(s); they will be "
         "exported in this cycle",
-        len(missing),
+        remote.id,
+        adopted,
     )
-    return len(missing)
+    return adopted
+
+
+async def _apply_pending_removals(
+    session: AsyncSession,
+    remote: AutomationGitSyncRemote,
+    sync_root: Path,
+    result: SyncCycleResult,
+) -> bool:
+    """Delete from the checkout the directories of automations moved away.
+
+    Each removal names a slug a reassignment left behind here; the generated
+    files under it go, and the directory only if that empties it, like a
+    deletion. Skipped when the slug has since been taken again by an
+    automation of this remote, whose files must not be deleted.
+    """
+    removals = (
+        (
+            await session.execute(
+                select(AutomationGitSyncRemoval).where(
+                    AutomationGitSyncRemoval.remote_id == remote.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not removals:
+        return False
+    live = await slugs_taken_by(session, remote.id, remote.org_id)
+    changed = False
+    for removal in removals:
+        directory = sync_root / removal.slug
+        if removal.slug not in live and directory.exists():
+            await asyncio.to_thread(_remove_exported_automation, directory)
+            changed = True
+            result.deleted_in_git += 1
+        await session.delete(removal)
+    return changed
 
 
 def _exported_content_is_current(
@@ -964,7 +1130,7 @@ def _exported_content_is_current(
 
 async def _export_dirty_automations(
     session: AsyncSession,
-    org_id: uuid.UUID,
+    remote: AutomationGitSyncRemote,
     sync_root: Path,
     encryption_key: str,
     result: SyncCycleResult,
@@ -973,7 +1139,7 @@ async def _export_dirty_automations(
         (
             await session.execute(
                 select(AutomationGitSyncState).where(
-                    AutomationGitSyncState.org_id == org_id,
+                    AutomationGitSyncState.remote_id == remote.id,
                     AutomationGitSyncState.dirty.is_(True),
                 )
             )
@@ -1045,11 +1211,11 @@ def lease_is_live(
     git_settings: GitSyncSettings,
     now: datetime | None = None,
 ) -> bool:
-    """Whether an org's `sync_started_at` marks a cycle that is still running.
+    """Whether a remote's `sync_started_at` marks a cycle that is still running.
 
-    The lease lives on the org's row rather than in-process so every replica
-    reports the same `sync_in_progress`; a stale one -- a cycle that crashed
-    without clearing it -- reads as idle once past the TTL.
+    The lease lives on the remote's row rather than in-process so every
+    replica reports the same `sync_in_progress`; a stale one -- a cycle that
+    crashed without clearing it -- reads as idle once past the TTL.
     """
     if started_at is None:
         return False
@@ -1058,26 +1224,24 @@ def lease_is_live(
 
 async def _acquire_sync_lease(
     session_factory: async_sessionmaker[AsyncSession],
-    org_id: uuid.UUID,
+    remote_id: uuid.UUID,
     started_at: datetime,
     ttl: timedelta,
 ) -> bool:
-    """Claim the org's lease unless a live cycle holds it.
+    """Claim the remote's lease unless a live cycle holds it.
 
     One conditional UPDATE, so two replicas -- or the periodic loop on one and
-    a manual trigger on another -- racing for the same org can't both win: the
-    database serializes the writes and exactly one sees a matching row.
+    a manual trigger on another -- racing for the same remote can't both win:
+    the database serializes the writes and exactly one sees a matching row.
     """
     async with session_factory() as session:
-        # Local mode may configure the repo from env alone, with no row yet.
-        await get_or_create_org_config(session, org_id)
         result: CursorResult = await session.execute(  # type: ignore[assignment]
-            update(AutomationGitSyncOrgConfig)
+            update(AutomationGitSyncRemote)
             .where(
-                AutomationGitSyncOrgConfig.org_id == org_id,
+                AutomationGitSyncRemote.id == remote_id,
                 or_(
-                    AutomationGitSyncOrgConfig.sync_started_at.is_(None),
-                    AutomationGitSyncOrgConfig.sync_started_at < started_at - ttl,
+                    AutomationGitSyncRemote.sync_started_at.is_(None),
+                    AutomationGitSyncRemote.sync_started_at < started_at - ttl,
                 ),
             )
             .values(sync_started_at=started_at)
@@ -1093,7 +1257,7 @@ async def _acquire_sync_lease(
 
 async def _release_sync_lease(
     session_factory: async_sessionmaker[AsyncSession],
-    org_id: uuid.UUID,
+    remote_id: uuid.UUID,
     started_at: datetime,
 ) -> None:
     """Clear the lease, but only if it is still ours.
@@ -1103,10 +1267,10 @@ async def _release_sync_lease(
     """
     async with session_factory() as session:
         await session.execute(
-            update(AutomationGitSyncOrgConfig)
+            update(AutomationGitSyncRemote)
             .where(
-                AutomationGitSyncOrgConfig.org_id == org_id,
-                AutomationGitSyncOrgConfig.sync_started_at == started_at,
+                AutomationGitSyncRemote.id == remote_id,
+                AutomationGitSyncRemote.sync_started_at == started_at,
             )
             .values(sync_started_at=None)
             # As in `_acquire_sync_lease`: nothing in this session is read
@@ -1116,57 +1280,80 @@ async def _release_sync_lease(
         await session.commit()
 
 
+async def _load_remote(
+    session: AsyncSession, remote_id: uuid.UUID
+) -> AutomationGitSyncRemote:
+    remote = await session.get(AutomationGitSyncRemote, remote_id)
+    if remote is None:
+        raise GitSyncError(f"git sync remote {remote_id} no longer exists")
+    return remote
+
+
 async def run_sync_cycle(
     session_factory: async_sessionmaker[AsyncSession],
     org_id: uuid.UUID,
     git_settings: GitSyncSettings,
     service_settings: ServiceSettings,
+    remote_id: uuid.UUID | None = None,
 ) -> SyncCycleResult:
-    """Run one full pull -> import -> export -> push cycle for one org.
+    """Run one full pull -> import -> export -> push cycle for one remote.
 
-    Takes the org's lease first. Replicas share the database but not a
+    `remote_id` names the remote; `None` means the org's default remote,
+    created if the org has none yet (local mode may configure it from env
+    alone, with no row). `git_settings` are the remote's effective settings,
+    resolved by the caller.
+
+    Takes the remote's lease first. Replicas share the database but not a
     process, so an in-process lock can't keep two pods -- or the periodic loop
     on one and a manual trigger on another -- from cloning and pushing the
     same repo at once. `skipped` means another cycle holds the lease; it picks
     up everything this one would have.
     """
+    if remote_id is None:
+        async with session_factory() as session:
+            remote = await get_or_create_default_remote(session, org_id)
+            await session.commit()
+            remote_id = remote.id
+
     started_at = utcnow()
     if not await _acquire_sync_lease(
-        session_factory, org_id, started_at, _lease_ttl(git_settings)
+        session_factory, remote_id, started_at, _lease_ttl(git_settings)
     ):
-        return SyncCycleResult(head=None, skipped=True)
+        return SyncCycleResult(head=None, remote_id=remote_id, skipped=True)
     try:
         return await _run_sync_cycle_leased(
-            session_factory, org_id, git_settings, service_settings
+            session_factory, remote_id, git_settings, service_settings
         )
     except Exception as e:
         async with session_factory() as session:
-            org_config = await get_or_create_org_config(session, org_id)
-            org_config.last_error = str(e)[:2000]
-            org_config.last_error_at = utcnow()
+            remote = await _load_remote(session, remote_id)
+            remote.last_error = str(e)[:2000]
+            remote.last_error_at = utcnow()
             # Only auth failures, which won't clear on the next tick, build the
             # streak behind `_is_due`'s backoff and `_cycle`'s quiet logging. A
-            # transient one (outage, timeout) resets it, so the org is back on
-            # its plain interval as soon as the provider recovers.
+            # transient one (outage, timeout) resets it, so the remote is back
+            # on its plain interval as soon as the provider recovers.
             if isinstance(e, GitAuthError):
-                org_config.consecutive_auth_failures = (
-                    org_config.consecutive_auth_failures or 0
+                remote.consecutive_auth_failures = (
+                    remote.consecutive_auth_failures or 0
                 ) + 1
             else:
-                org_config.consecutive_auth_failures = 0
+                remote.consecutive_auth_failures = 0
             await session.commit()
         raise
     finally:
-        await _release_sync_lease(session_factory, org_id, started_at)
+        await _release_sync_lease(session_factory, remote_id, started_at)
 
 
 async def _run_sync_cycle_leased(
     session_factory: async_sessionmaker[AsyncSession],
-    org_id: uuid.UUID,
+    remote_id: uuid.UUID,
     git_settings: GitSyncSettings,
     service_settings: ServiceSettings,
 ) -> SyncCycleResult:
-    workdir = _resolve_workdir(git_settings, service_settings, org_id)
+    async with session_factory() as session:
+        remote = await _load_remote(session, remote_id)
+        workdir = _resolve_workdir(git_settings, service_settings, remote)
     timeout = git_settings.git_sync_git_timeout_seconds
     token = git_settings.git_sync_token
     branch = git_settings.git_sync_branch.strip()
@@ -1174,7 +1361,7 @@ async def _run_sync_cycle_leased(
 
     # Re-validated here, not only at the API boundary, since this also covers a
     # misconfigured AUTOMATION_GIT_SYNC_PATH and `sync_root` is what the export
-    # rmtree's per automation. Raising leaves the reason in the org's
+    # rmtree's per automation. Raising leaves the reason in the remote's
     # `last_error` instead of deleting host directories that happen to share a
     # name with an automation slug.
     sync_path = normalize_git_sync_path(git_settings.git_sync_path)
@@ -1190,7 +1377,7 @@ async def _run_sync_cycle_leased(
     await ensure_repo(workdir, git_settings.git_sync_repo_url, branch, token, timeout)
     head = await pull(workdir, branch, token, timeout)
 
-    result = SyncCycleResult(head=head)
+    result = SyncCycleResult(head=head, remote_id=remote_id)
 
     # Storage paths of superseded uploads soft-deleted during the import; their
     # objects are only removed after the commit below succeeds, so a rollback
@@ -1201,22 +1388,22 @@ async def _run_sync_cycle_leased(
     # single-writer lock for the whole transaction, and a push can take up to
     # git_sync_git_timeout_seconds.
     async with session_factory() as session:
-        org_config = await get_or_create_org_config(session, org_id)
-        last_commit = org_config.last_synced_commit
-        owner = _import_owner(org_config)
+        remote = await _load_remote(session, remote_id)
+        last_commit = remote.last_synced_commit
+        owner = _import_owner(remote)
 
         # Before the import: a path change leaves the new sync_root empty, and
         # the import's "directory disappeared" branch would read that as every
         # automation having been deleted in git.
-        last_path = org_config.last_synced_path
+        last_path = remote.last_synced_path
         if last_path is not None and last_path != sync_path:
-            await _handle_path_change(session, org_id, workdir, last_path, sync_path)
-        org_config.last_synced_path = sync_path
+            await _handle_path_change(session, remote, workdir, last_path, sync_path)
+        remote.last_synced_path = sync_path
 
         if head is not None and head != last_commit:
             await _import_from_git(
                 session,
-                org_id,
+                remote,
                 owner,
                 workdir,
                 sync_root,
@@ -1231,12 +1418,13 @@ async def _run_sync_cycle_leased(
 
         # After the import, so automations that arrived from git this cycle
         # already have their state row and aren't re-created here.
-        await _backfill_missing_states(session, org_id)
+        await _backfill_missing_states(session, remote)
 
-        # Return value unused: the counters land on `result`, and the push must
-        # run regardless of whether anything was exported (see below).
+        # Return values unused: the counters land on `result`, and the push
+        # must run regardless of whether anything was exported (see below).
+        await _apply_pending_removals(session, remote, sync_root, result)
         await _export_dirty_automations(
-            session, org_id, sync_root, encryption_key, result
+            session, remote, sync_root, encryption_key, result
         )
         await session.commit()
 
@@ -1263,18 +1451,18 @@ async def _run_sync_cycle_leased(
 
     new_head = pushed or head
     async with session_factory() as session:
-        org_config = await get_or_create_org_config(session, org_id)
+        remote = await _load_remote(session, remote_id)
         if new_head:
-            org_config.last_synced_commit = new_head
-        org_config.last_run_at = utcnow()
+            remote.last_synced_commit = new_head
+        remote.last_run_at = utcnow()
         # Both halves, or the status endpoint reports a `last_error_at` with no
         # `last_error` to go with it.
-        org_config.last_error = None
-        org_config.last_error_at = None
+        remote.last_error = None
+        remote.last_error_at = None
         # A success clears the backoff: the next cycle runs at the normal
         # interval again, which is what makes recovery automatic once a token
         # or repo is fixed -- no manual re-enable.
-        org_config.consecutive_auth_failures = 0
+        remote.consecutive_auth_failures = 0
         await session.commit()
 
     return result
@@ -1283,7 +1471,7 @@ async def _run_sync_cycle_leased(
 def _retry_backoff_seconds(
     interval_seconds: int, consecutive_auth_failures: int, backoff_cap_seconds: float
 ) -> float:
-    """The un-jittered wait an org owes before its next cycle.
+    """The un-jittered wait a remote owes before its next cycle.
 
     Healthy it is the plain interval. After auth failures the wait grows
     exponentially -- ``interval * 2**failures`` -- capped at
@@ -1295,33 +1483,35 @@ def _retry_backoff_seconds(
     if consecutive_auth_failures <= 0:
         return float(interval_seconds)
     # Bound the shift so `2**failures` can't overflow into an enormous float on
-    # a long-broken org; the cap makes anything past a handful of failures moot.
+    # a long-broken remote; the cap makes anything past a handful of failures
+    # moot.
     shift = min(consecutive_auth_failures, 30)
     return min(float(interval_seconds * (2**shift)), backoff_cap_seconds)
 
 
-def _jitter_fraction(org_id: uuid.UUID, reference: datetime) -> float:
-    """A deterministic fraction in ``[0, 1)`` keyed on the org and its attempt.
+def _jitter_fraction(remote_id: uuid.UUID, reference: datetime) -> float:
+    """A deterministic fraction in ``[0, 1)`` keyed on the remote and its
+    attempt.
 
     Deterministic on purpose: ``_is_due`` is re-evaluated every tick across a
     whole wait window, and fresh randomness each tick would let any low roll
-    fire early, collapsing the wait toward zero. Keying on ``org_id`` spreads
-    different orgs apart; keying on the attempt time re-rolls the offset each
-    round so a herd doesn't stay phase-locked.
+    fire early, collapsing the wait toward zero. Keying on ``remote_id``
+    spreads different remotes apart; keying on the attempt time re-rolls the
+    offset each round so a herd doesn't stay phase-locked.
     """
-    seed = f"{org_id}:{reference.timestamp():.0f}".encode()
+    seed = f"{remote_id}:{reference.timestamp():.0f}".encode()
     digest = hashlib.blake2b(seed, digest_size=8).digest()
     return int.from_bytes(digest, "big") / (1 << 64)
 
 
 def _is_due(
-    org_config: AutomationGitSyncOrgConfig,
+    remote: AutomationGitSyncRemote,
     interval_seconds: int,
     now: datetime,
     backoff_cap_seconds: float,
 ) -> bool:
-    """Whether the org's (backed-off, jittered) wait has elapsed since its last
-    cycle.
+    """Whether the remote's (backed-off, jittered) wait has elapsed since its
+    last cycle.
 
     A failed cycle counts as an attempt too: a repo that is down waits out the
     interval like a healthy one instead of being retried every tick. After
@@ -1330,25 +1520,26 @@ def _is_due(
     less often, up to ``backoff_cap_seconds``.
 
     While backing off, the wait carries equal jitter -- a deterministic offset
-    in ``[0.5, 1.0)`` of the ceiling -- so orgs knocked out together (a mass
-    token expiry) don't all hit the cap boundary on the same tick and retry as
-    a synchronized herd. The result is floored at the interval: backing off
-    must never retry a failing org sooner than a healthy one, which a cap
-    below the interval (an hourly or daily sync) would otherwise do. Healthy
-    orgs are not jittered -- their independent ``last_run_at`` keeps them apart.
+    in ``[0.5, 1.0)`` of the ceiling -- so remotes knocked out together (a
+    mass token expiry) don't all hit the cap boundary on the same tick and
+    retry as a synchronized herd. The result is floored at the interval:
+    backing off must never retry a failing remote sooner than a healthy one,
+    which a cap below the interval (an hourly or daily sync) would otherwise
+    do. Healthy remotes are not jittered -- their independent ``last_run_at``
+    keeps them apart.
     """
     attempts = [
         ensure_utc(at)
-        for at in (org_config.last_run_at, org_config.last_error_at)
+        for at in (remote.last_run_at, remote.last_error_at)
         if at is not None
     ]
     if not attempts:
         return True
     last_attempt = max(attempts)
-    failures = org_config.consecutive_auth_failures or 0
+    failures = remote.consecutive_auth_failures or 0
     wait = _retry_backoff_seconds(interval_seconds, failures, backoff_cap_seconds)
     if failures > 0:
-        wait *= 0.5 + 0.5 * _jitter_fraction(org_config.org_id, last_attempt)
+        wait *= 0.5 + 0.5 * _jitter_fraction(remote.id, last_attempt)
         wait = max(wait, float(interval_seconds))
     return now - last_attempt >= timedelta(seconds=wait)
 
@@ -1357,22 +1548,23 @@ async def git_sync_loop(
     session_factory: async_sessionmaker[AsyncSession],
     shutdown_event: asyncio.Event | None = None,
 ) -> None:
-    """Background loop: periodically syncs each configured org with its repo.
+    """Background loop: periodically syncs each configured remote with its repo.
 
-    Started unconditionally by app.py. Every tick re-reads each org's runtime
-    config and runs a cycle for the orgs that are enabled, have a positive
-    interval and are due; the rest idle without dying. In local mode the one
-    local org may be configured from env alone, so its row is created here.
+    Started unconditionally by app.py. Every tick re-reads each remote's
+    runtime config and runs a cycle for the remotes that are enabled, have a
+    positive interval and are due; the rest idle without dying. In local mode
+    the one local org may have its default remote configured from env alone,
+    so that row is created here.
 
-    Ticks every `_IDLE_POLL_SECONDS` instead of sleeping an org's interval:
-    intervals are per org and set from the UI, and a short tick is what lets a
-    newly-set one take effect without a restart. An org never syncs while its
-    interval is 0 (manual-only).
+    Ticks every `_IDLE_POLL_SECONDS` instead of sleeping a remote's interval:
+    intervals are per remote and set from the UI, and a short tick is what
+    lets a newly-set one take effect without a restart. A remote never syncs
+    while its interval is 0 (manual-only).
     """
     service_settings = get_config().service
 
     logger.info(
-        "Git sync loop started; each org's interval is set from the UI, "
+        "Git sync loop started; each remote's interval is set from the UI, "
         "0 means manual-only"
     )
 
@@ -1381,54 +1573,61 @@ async def git_sync_loop(
 
     async def _cycle() -> None:
         now = utcnow()
-        # (org_id, effective settings, auth-failure streak before this cycle).
-        # The streak decides how loud a fresh auth failure is logged below.
-        due: list[tuple[uuid.UUID, GitSyncSettings, int]] = []
+        # (org_id, remote_id, effective settings, auth-failure streak before
+        # this cycle). The streak decides how loud a fresh auth failure is
+        # logged below.
+        due: list[tuple[uuid.UUID, uuid.UUID, GitSyncSettings, int]] = []
         async with session_factory() as session:
-            if service_settings.is_local_mode:
-                await get_or_create_org_config(session, _get_local_user().org_id)
+            if service_settings.is_local_mode and is_git_sync_active():
+                # The env-configured repo needs a row to carry its lease and
+                # status; an unconfigured local org gets none until the UI
+                # creates one.
+                await get_or_create_default_remote(session, _get_local_user().org_id)
                 await session.commit()
             rows = (
-                (await session.execute(select(AutomationGitSyncOrgConfig)))
-                .scalars()
-                .all()
+                (await session.execute(select(AutomationGitSyncRemote))).scalars().all()
             )
-            for org_config in rows:
-                effective = effective_settings_for(org_config)
-                interval = effective_interval_for(org_config)
+            for remote in rows:
+                effective = effective_settings_for(remote)
+                interval = effective_interval_for(remote)
                 if not effective.enabled:
                     logger.debug(
-                        "Git sync for org %s is paused or unconfigured; skipping",
-                        org_config.org_id,
+                        "Git sync remote %s is paused or unconfigured; skipping",
+                        remote.id,
                     )
                     continue
                 if interval <= 0:
                     logger.debug(
-                        "Git sync for org %s is manual-only; skipping this "
+                        "Git sync remote %s is manual-only; skipping this "
                         "automatic cycle",
-                        org_config.org_id,
+                        remote.id,
                     )
                     continue
                 if _is_due(
-                    org_config,
+                    remote,
                     interval,
                     now,
                     effective.git_sync_failure_backoff_cap_seconds,
                 ):
                     due.append(
                         (
-                            org_config.org_id,
+                            remote.org_id,
+                            remote.id,
                             effective,
-                            org_config.consecutive_auth_failures or 0,
+                            remote.consecutive_auth_failures or 0,
                         )
                     )
 
-        # One org's failure must not stop the others, so each gets its own
+        # One remote's failure must not stop the others, so each gets its own
         # try: `run_periodic_loop` only guards the tick as a whole.
-        for org_id, effective, prior_auth_failures in due:
+        for org_id, remote_id, effective, prior_auth_failures in due:
             try:
                 result = await run_sync_cycle(
-                    session_factory, org_id, effective, service_settings
+                    session_factory,
+                    org_id,
+                    effective,
+                    service_settings,
+                    remote_id=remote_id,
                 )
             except GitAuthError:
                 # Auth failures are persistent (revoked token, repo gone). Log
@@ -1438,27 +1637,31 @@ async def git_sync_loop(
                 threshold = effective.git_sync_auth_failure_backoff_threshold
                 if threshold > 0 and prior_auth_failures + 1 >= threshold:
                     logger.warning(
-                        "Git sync for org %s keeps failing authentication "
+                        "Git sync remote %s (org %s) keeps failing authentication "
                         "(%d consecutive); backing off and suppressing the "
                         "traceback until its token or repo recovers",
+                        remote_id,
                         org_id,
                         prior_auth_failures + 1,
                     )
                 else:
-                    logger.exception("Git sync cycle failed for org %s (auth)", org_id)
+                    logger.exception(
+                        "Git sync cycle failed for remote %s (auth)", remote_id
+                    )
                 continue
             except GitSyncError:
-                logger.exception("Git sync cycle failed for org %s", org_id)
+                logger.exception("Git sync cycle failed for remote %s", remote_id)
                 continue
             except Exception:
                 logger.exception(
-                    "Unexpected error in git sync cycle for org %s", org_id
+                    "Unexpected error in git sync cycle for remote %s", remote_id
                 )
                 continue
             if result.skipped:
                 logger.debug(
-                    "Git sync cycle for org %s skipped: another cycle holds the lease",
-                    org_id,
+                    "Git sync cycle for remote %s skipped: another cycle holds "
+                    "the lease",
+                    remote_id,
                 )
             elif any(
                 (
@@ -1469,9 +1672,9 @@ async def git_sync_loop(
                 )
             ):
                 logger.info(
-                    "Git sync cycle complete for org %s: imported=%d exported=%d "
-                    "deleted_in_db=%d deleted_in_git=%d pushed=%s",
-                    org_id,
+                    "Git sync cycle complete for remote %s: imported=%d "
+                    "exported=%d deleted_in_db=%d deleted_in_git=%d pushed=%s",
+                    remote_id,
                     result.imported,
                     result.exported,
                     result.deleted_in_db,

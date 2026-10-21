@@ -22,6 +22,7 @@ from openhands.automation.git_sync import (
     git_sync_loop,
     is_git_sync_active,
     mark_git_sync_dirty,
+    reassign_automation,
     run_sync_cycle,
 )
 from openhands.automation.git_sync.client import (
@@ -33,8 +34,12 @@ from openhands.automation.git_sync.client import (
 )
 from openhands.automation.git_sync.config_override import (
     apply_git_sync_config_override,
+    apply_remote_config_override,
+    create_remote,
+    delete_remote,
     effective_settings_for,
-    get_or_create_org_config,
+    get_default_remote,
+    get_or_create_default_remote,
 )
 from openhands.automation.git_sync.loop import _delete_superseded_upload
 from openhands.automation.git_sync.serializer import (
@@ -43,7 +48,7 @@ from openhands.automation.git_sync.serializer import (
 )
 from openhands.automation.models import (
     Automation,
-    AutomationGitSyncOrgConfig,
+    AutomationGitSyncRemote,
     AutomationGitSyncState,
     Base,
     TarballUpload,
@@ -67,10 +72,11 @@ async def _aiter(data: bytes):
 
 async def _org_config(
     session_factory, org_id: uuid.UUID = LOCAL_ORG_ID
-) -> AutomationGitSyncOrgConfig | None:
-    """The org's row, where a cycle records its last commit, run and error."""
+) -> AutomationGitSyncRemote | None:
+    """The org's default remote, where a cycle records its last commit, run
+    and error."""
     async with session_factory() as session:
-        return await session.get(AutomationGitSyncOrgConfig, org_id)
+        return await get_default_remote(session, org_id)
 
 
 async def _apply_override(session, updates: dict) -> None:
@@ -463,7 +469,7 @@ class TestRunSyncCycle:
 
         # Unreachable base -> diff fails -> full-scan fallback.
         async with sqlite_session_factory() as session:
-            org_config = await get_or_create_org_config(session, LOCAL_ORG_ID)
+            org_config = await get_or_create_default_remote(session, LOCAL_ORG_ID)
             org_config.last_synced_commit = "0" * 40
             await session.commit()
 
@@ -1179,7 +1185,7 @@ class TestEncryptionKeyChangeReExports:
         async with session_factory() as session:
             await _apply_override(session, {"git_sync_encryption_key": key})
             await session.commit()
-            org_config = await get_or_create_org_config(session, LOCAL_ORG_ID)
+            org_config = await get_or_create_default_remote(session, LOCAL_ORG_ID)
             return effective_settings_for(org_config)
 
     async def _sync(self, session_factory, settings, service_settings):
@@ -1323,7 +1329,7 @@ class TestLastError:
         self, sqlite_session_factory, file_store, git_settings, service_settings
     ):
         async with sqlite_session_factory() as session:
-            org_config = await get_or_create_org_config(session, LOCAL_ORG_ID)
+            org_config = await get_or_create_default_remote(session, LOCAL_ORG_ID)
             org_config.last_error = "a stale error"
             org_config.last_error_at = utcnow()
             await session.commit()
@@ -1427,17 +1433,17 @@ class TestSyncInProgress:
         import openhands.automation.git_sync.loop as loop_module
 
         held_rows = []
-        real_get_or_create = loop_module.get_or_create_org_config
+        real_get_or_create = loop_module.get_or_create_default_remote
 
         async def keep_the_row(session, org_id):
             row = await real_get_or_create(session, org_id)
             held_rows.append(row)
             return row
 
-        monkeypatch.setattr(loop_module, "get_or_create_org_config", keep_the_row)
+        monkeypatch.setattr(loop_module, "get_or_create_default_remote", keep_the_row)
 
         async with sqlite_session_factory() as session:
-            org_config = await get_or_create_org_config(session, LOCAL_ORG_ID)
+            org_config = await get_or_create_default_remote(session, LOCAL_ORG_ID)
             org_config.sync_started_at = utcnow()
             await session.commit()
         await _create_internal_automation(sqlite_session_factory, file_store)
@@ -1457,7 +1463,7 @@ class TestSyncInProgress:
         import openhands.automation.git_sync.loop as loop_module
 
         async with sqlite_session_factory() as session:
-            org_config = await get_or_create_org_config(session, LOCAL_ORG_ID)
+            org_config = await get_or_create_default_remote(session, LOCAL_ORG_ID)
             org_config.sync_started_at = (
                 utcnow() - loop_module._lease_ttl(git_settings) - timedelta(seconds=1)
             )
@@ -1661,7 +1667,7 @@ class TestGitSyncLoop:
         # below is the 3rd consecutive auth failure -- the first quiet one. The
         # old last_error_at keeps the backed-off org due immediately.
         async with sqlite_session_factory() as session:
-            row = await session.get(AutomationGitSyncOrgConfig, LOCAL_ORG_ID)
+            row = await get_default_remote(session, LOCAL_ORG_ID)
             assert row is not None
             row.consecutive_auth_failures = 2
             row.last_error_at = utcnow() - timedelta(seconds=3600)
@@ -1771,7 +1777,9 @@ class TestExportPreservesUserFiles:
             sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
         )
 
-        workdir = Path(git_settings.git_sync_local_workdir)
+        remote = await _org_config(sqlite_session_factory)
+        assert remote is not None
+        workdir = Path(git_settings.git_sync_local_workdir) / str(remote.id)
         slug_dir = workdir / "automations" / "my-first-automation"
         (slug_dir / "README.md").write_text("hand-written notes")
         subprocess.run(["git", "add", "-A"], cwd=workdir, check=True)
@@ -2441,7 +2449,7 @@ class TestFailureBackoffState:
         import openhands.automation.git_sync.loop as loop_module
 
         async with sqlite_session_factory() as session:
-            row = await get_or_create_org_config(session, LOCAL_ORG_ID)
+            row = await get_or_create_default_remote(session, LOCAL_ORG_ID)
             row.consecutive_auth_failures = 2
             await session.commit()
 
@@ -2503,3 +2511,281 @@ class TestFailureBackoffState:
         assert row.consecutive_auth_failures == 0
         assert row.last_error is None
         assert row.last_error_at is None
+
+
+def _tree(origin: Path, branch: str = "main") -> list[str]:
+    """Every path committed at the bare repo's `branch`, or none."""
+    result = subprocess.run(
+        ["git", "--git-dir", str(origin), "ls-tree", "-r", "--name-only", branch],
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.split() if result.returncode == 0 else []
+
+
+class TestMultipleRemotes:
+    """An org syncs several repositories. Each remote exports only the
+    automations assigned to it, a move carries the directory from one repo to
+    the other, imports stay with the remote they came from, and a deleted
+    remote's automations fall back to the default."""
+
+    @pytest.fixture
+    def second_origin(self, tmp_path):
+        origin_dir = tmp_path / "origin2"
+        origin_dir.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", "-q", "-b", "main"], cwd=origin_dir, check=True
+        )
+        return origin_dir
+
+    @pytest.fixture
+    async def second_remote(self, sqlite_session_factory, git_settings, second_origin):
+        """A non-default remote pointing at `second_origin`; returns its id and
+        the settings a cycle runs with (branch, path and workdir from env)."""
+        async with sqlite_session_factory() as session:
+            # The env-configured default exists first, as it would after the
+            # loop's first tick; otherwise this one would become the default.
+            await get_or_create_default_remote(session, LOCAL_ORG_ID)
+            remote = await create_remote(
+                session,
+                LOCAL_ORG_ID,
+                label="Second",
+                configured_by_user_id=LOCAL_USER_ID,
+            )
+            await apply_remote_config_override(
+                session,
+                remote,
+                {"git_sync_repo_url": f"file://{second_origin}"},
+                configured_by_user_id=LOCAL_USER_ID,
+            )
+            await session.commit()
+            assert remote.is_default is False
+            return remote.id, effective_settings_for(remote)
+
+    async def _move(self, session_factory, automation_id, remote_id) -> None:
+        async with session_factory() as session:
+            state = await session.get(AutomationGitSyncState, automation_id)
+            remote = await session.get(AutomationGitSyncRemote, remote_id)
+            await reassign_automation(session, state, remote)
+            await session.commit()
+
+    async def test_each_remote_exports_only_its_own_automations(
+        self,
+        sqlite_session_factory,
+        file_store,
+        git_settings,
+        service_settings,
+        origin,
+        second_origin,
+        second_remote,
+    ):
+        second_id, second_settings = second_remote
+        # The first automation is created before any remote exists for the
+        # default to be resolved from env, so it is adopted; the second is
+        # assigned to the default at creation and then moved.
+        first = await _create_internal_automation(
+            sqlite_session_factory, file_store, name="First"
+        )
+        second = await _create_internal_automation(
+            sqlite_session_factory, file_store, name="Second"
+        )
+        await self._move(sqlite_session_factory, second, second_id)
+
+        default_result = await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+        second_result = await run_sync_cycle(
+            sqlite_session_factory,
+            LOCAL_ORG_ID,
+            second_settings,
+            service_settings,
+            remote_id=second_id,
+        )
+
+        assert default_result.exported == 1
+        assert second_result.exported == 1
+        assert second_result.remote_id == second_id
+        assert "automations/first/automation.yaml" in _tree(origin)
+        assert not any(path.startswith("automations/second/") for path in _tree(origin))
+        assert "automations/second/automation.yaml" in _tree(second_origin)
+        assert not any(
+            path.startswith("automations/first/") for path in _tree(second_origin)
+        )
+
+        async with sqlite_session_factory() as session:
+            default = await get_default_remote(session, LOCAL_ORG_ID)
+            states = {
+                s.automation_id: s.remote_id
+                for s in (await session.execute(select(AutomationGitSyncState)))
+                .scalars()
+                .all()
+            }
+        assert states == {first: default.id, second: second_id}
+
+    async def test_moving_an_automation_takes_its_directory_along(
+        self,
+        sqlite_session_factory,
+        file_store,
+        git_settings,
+        service_settings,
+        origin,
+        second_origin,
+        second_remote,
+    ):
+        second_id, second_settings = second_remote
+        automation_id = await _create_internal_automation(
+            sqlite_session_factory, file_store
+        )
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+        assert "automations/my-first-automation/automation.yaml" in _tree(origin)
+
+        await self._move(sqlite_session_factory, automation_id, second_id)
+
+        arrived = await run_sync_cycle(
+            sqlite_session_factory,
+            LOCAL_ORG_ID,
+            second_settings,
+            service_settings,
+            remote_id=second_id,
+        )
+        departed = await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+
+        assert arrived.exported == 1
+        assert "automations/my-first-automation/automation.yaml" in _tree(second_origin)
+        assert departed.deleted_in_git == 1
+        assert departed.pushed_commit is not None
+        assert not any(
+            path.startswith("automations/my-first-automation/")
+            for path in _tree(origin)
+        )
+
+    async def test_imports_belong_to_the_remote_they_came_from(
+        self,
+        sqlite_session_factory,
+        git_settings,
+        service_settings,
+        origin,
+        second_origin,
+        second_remote,
+    ):
+        second_id, second_settings = second_remote
+        seed_dir = second_origin.parent / "seed-second"
+        await ensure_repo(seed_dir, f"file://{second_origin}", "main", "", 30)
+        await pull(seed_dir, "main", "", 30)
+        autodir = seed_dir / "automations" / "from-second"
+        autodir.mkdir(parents=True)
+        (autodir / "automation.yaml").write_text(
+            "name: From Second\n"
+            "entrypoint: python main.py\n"
+            "trigger:\n"
+            "  type: cron\n"
+            "  schedule: '0 12 * * *'\n"
+            "  timezone: UTC\n"
+            "enabled: true\n"
+        )
+        (autodir / "tarball").mkdir()
+        (autodir / "tarball" / "main.py").write_text('print("hi")')
+        await commit_and_push(
+            seed_dir,
+            "automations",
+            "seed",
+            "Human",
+            "human@example.com",
+            "main",
+            "",
+            30,
+        )
+
+        imported = await run_sync_cycle(
+            sqlite_session_factory,
+            LOCAL_ORG_ID,
+            second_settings,
+            service_settings,
+            remote_id=second_id,
+        )
+        default_result = await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+
+        assert imported.imported == 1
+        # The default neither re-exports it nor treats it as deleted.
+        assert default_result.exported == 0
+        assert default_result.deleted_in_db == 0
+        assert _tree(origin) == []
+        async with sqlite_session_factory() as session:
+            state = (
+                (await session.execute(select(AutomationGitSyncState))).scalars().one()
+            )
+            assert state.remote_id == second_id
+            assert state.slug == "from-second"
+
+    async def test_deleting_a_remote_hands_its_automations_to_the_default(
+        self,
+        sqlite_session_factory,
+        file_store,
+        git_settings,
+        service_settings,
+        origin,
+        second_origin,
+        second_remote,
+    ):
+        second_id, second_settings = second_remote
+        automation_id = await _create_internal_automation(
+            sqlite_session_factory, file_store
+        )
+        await self._move(sqlite_session_factory, automation_id, second_id)
+        await run_sync_cycle(
+            sqlite_session_factory,
+            LOCAL_ORG_ID,
+            second_settings,
+            service_settings,
+            remote_id=second_id,
+        )
+        assert "automations/my-first-automation/automation.yaml" in _tree(second_origin)
+
+        async with sqlite_session_factory() as session:
+            remote = await session.get(AutomationGitSyncRemote, second_id)
+            await delete_remote(session, remote)
+            await session.commit()
+
+        result = await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+
+        assert result.exported == 1
+        assert "automations/my-first-automation/automation.yaml" in _tree(origin)
+        # The repository this service no longer syncs is left as it was.
+        assert "automations/my-first-automation/automation.yaml" in _tree(second_origin)
+        async with sqlite_session_factory() as session:
+            default = await get_default_remote(session, LOCAL_ORG_ID)
+            state = await session.get(AutomationGitSyncState, automation_id)
+            assert state.remote_id == default.id
+
+    async def test_the_default_inherits_the_pre_remotes_checkout(
+        self, sqlite_session_factory, file_store, git_settings, service_settings, origin
+    ):
+        """Before remotes existed the one checkout lived at the workdir root;
+        the default remote takes it over rather than cloning afresh."""
+        root = Path(git_settings.git_sync_local_workdir)
+        await ensure_repo(root, f"file://{origin}", "main", "", 30)
+        assert (root / ".git").is_dir()
+        marker = root / "left-over.txt"
+        marker.write_text("an untracked file from the old checkout")
+
+        await _create_internal_automation(sqlite_session_factory, file_store)
+        result = await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+
+        assert result.exported == 1
+        remote = await _org_config(sqlite_session_factory)
+        assert remote is not None
+        assert not (root / ".git").exists()
+        assert (root / str(remote.id) / ".git").is_dir()
+        assert (root / str(remote.id) / "left-over.txt").read_text() == (
+            "an untracked file from the old checkout"
+        )
