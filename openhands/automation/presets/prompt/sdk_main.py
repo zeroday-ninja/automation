@@ -435,7 +435,8 @@ More activity arrived on the same subject while this run was queued:
             if agent_profile_id
             else workspace.get_secrets()
         )
-        print(f"  available: {list(secrets.keys()) or '(none)'}")
+        # The count only: even the names of a profile's secrets are its own.
+        print(f"  available: {len(secrets)} secret(s)")
     except Exception as e:
         # Not a hard failure — user may not have secrets configured
         print(f"  get_secrets() failed (ok if no secrets): {e}")
