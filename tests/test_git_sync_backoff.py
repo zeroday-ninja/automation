@@ -1,6 +1,6 @@
 """Unit tests for git-sync retry backoff and due-scheduling.
 
-Pure functions over a lightweight stand-in for the org config row -- no DB and
+Pure functions over a lightweight stand-in for the remote row -- no DB and
 no git. The integration side (counter increments/resets across a real cycle)
 lives in ``test_git_sync.py``.
 """
@@ -15,7 +15,7 @@ from openhands.automation.git_sync.loop import (
     _jitter_fraction,
     _retry_backoff_seconds,
 )
-from openhands.automation.models import AutomationGitSyncOrgConfig
+from openhands.automation.models import AutomationGitSyncRemote
 from openhands.automation.utils import utcnow
 
 
@@ -43,14 +43,14 @@ class TestRetryBackoffSeconds:
 
 def _org(
     consecutive_auth_failures: int, *, last_error_at=None, last_run_at=None, org_id=None
-) -> AutomationGitSyncOrgConfig:
+) -> AutomationGitSyncRemote:
     # A lightweight stand-in for the ORM row: _is_due only reads these four
     # attributes, so a SimpleNamespace is enough. Cast so the pure-function
     # calls type-check without building a real DB-backed model.
     return cast(
-        AutomationGitSyncOrgConfig,
+        AutomationGitSyncRemote,
         SimpleNamespace(
-            org_id=org_id or uuid.uuid4(),
+            id=org_id or uuid.uuid4(),
             consecutive_auth_failures=consecutive_auth_failures,
             last_error_at=last_error_at,
             last_run_at=last_run_at,
