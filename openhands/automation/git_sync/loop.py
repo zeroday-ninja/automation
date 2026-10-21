@@ -842,9 +842,36 @@ async def _import_from_git(
         .all()
     )
     states_by_slug = {s.slug: s for s in states}
+    # The org's automations no remote owns: a removed remote leaves its rows
+    # like this until the default adopts them. A directory with one of their
+    # names is that automation coming back -- the repository was removed and
+    # added again -- not a new one, so it is re-adopted rather than copied.
+    unassigned_by_slug = {
+        s.slug: s
+        for s in (
+            await session.execute(
+                select(AutomationGitSyncState).where(
+                    AutomationGitSyncState.org_id == remote.org_id,
+                    AutomationGitSyncState.remote_id.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    }
 
     for slug, directory in dirs_to_process.items():
         state = states_by_slug.get(slug)
+        if state is None and slug in unassigned_by_slug:
+            state = unassigned_by_slug.pop(slug)
+            state.remote_id = remote.id
+            states_by_slug[slug] = state
+            logger.info(
+                "Remote %s re-adopted unassigned automation %s (slug=%r)",
+                remote.id,
+                state.automation_id,
+                slug,
+            )
         if state is not None and state.dirty:
             # VM wins this cycle; the export overwrites git with the DB's copy.
             continue

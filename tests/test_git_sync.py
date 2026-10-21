@@ -2789,3 +2789,73 @@ class TestMultipleRemotes:
         assert (root / str(remote.id) / "left-over.txt").read_text() == (
             "an untracked file from the old checkout"
         )
+
+    async def test_re_adding_a_removed_repository_re_adopts_its_automations(
+        self,
+        sqlite_session_factory,
+        file_store,
+        git_settings,
+        service_settings,
+        second_origin,
+        second_remote,
+    ):
+        """Removing a remote and adding the same repository back must not
+        import its directories as duplicates of the automations it left
+        unassigned."""
+        second_id, second_settings = second_remote
+        automation_id = await _create_internal_automation(
+            sqlite_session_factory, file_store
+        )
+        await self._move(sqlite_session_factory, automation_id, second_id)
+        await run_sync_cycle(
+            sqlite_session_factory,
+            LOCAL_ORG_ID,
+            second_settings,
+            service_settings,
+            remote_id=second_id,
+        )
+        async with sqlite_session_factory() as session:
+            remote = await session.get(AutomationGitSyncRemote, second_id)
+            await delete_remote(session, remote)
+            await session.commit()
+
+        async with sqlite_session_factory() as session:
+            again = await create_remote(
+                session,
+                LOCAL_ORG_ID,
+                label="Second again",
+                configured_by_user_id=LOCAL_USER_ID,
+            )
+            await apply_remote_config_override(
+                session,
+                again,
+                {"git_sync_repo_url": f"file://{second_origin}"},
+                configured_by_user_id=LOCAL_USER_ID,
+            )
+            await session.commit()
+            again_id, again_settings = again.id, effective_settings_for(again)
+
+        result = await run_sync_cycle(
+            sqlite_session_factory,
+            LOCAL_ORG_ID,
+            again_settings,
+            service_settings,
+            remote_id=again_id,
+        )
+
+        assert result.imported == 0
+        async with sqlite_session_factory() as session:
+            automations = (
+                (
+                    await session.execute(
+                        select(Automation).where(Automation.deleted_at.is_(None))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert [a.id for a in automations] == [automation_id]
+            state = await session.get(AutomationGitSyncState, automation_id)
+            assert state.remote_id == again_id
+            assert state.dirty is False
+        assert "automations/my-first-automation/automation.yaml" in _tree(second_origin)
