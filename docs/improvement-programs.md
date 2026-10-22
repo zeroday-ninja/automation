@@ -85,6 +85,11 @@ a repository source and its list, a builder and its reviewers — so a partial
 update would have to re-validate the merged result anyway. It applies from the
 next cycle; one already running keeps the configuration it claimed with.
 
+An explicit repository URL must be one a run can actually clone: `https://`,
+`git@` or `file://`, the exact set the SDK's `RepoSource` accepts. A looser
+rule here would only move the failure from creation, where the user is looking,
+to the middle of a cycle. `http://` is refused rather than silently upgraded.
+
 An explicit repository URL has any embedded username or password dropped. It
 would otherwise be stored in the automation's metadata, exported to the Git
 Sync repository with it, and shown in the dashboard, and a cycle clones with a

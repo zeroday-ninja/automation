@@ -498,6 +498,41 @@ class TestRepositoryUrls:
         assert "s3cret" not in claimed.text
 
 
+class TestRepositoryUrlSchemes:
+    """Only URLs a cycle can actually clone are accepted."""
+
+    @pytest.mark.parametrize("url", ["git://host/repo.git", "ssh://host/repo.git"])
+    async def test_rejects_a_scheme_a_run_cannot_clone(self, async_client, url):
+        # Accepting it would move the failure from here, where the user is
+        # looking, to the middle of a cycle.
+        response = await async_client.post(
+            PRESET,
+            json={
+                "name": "Unclonable",
+                "trigger": CRON,
+                "improve": improve_config(
+                    repository_source="explicit",
+                    repositories=[{"label": "one", "url": url}],
+                ),
+            },
+        )
+        assert response.status_code == 422
+
+    async def test_rejects_plain_http_rather_than_upgrading_it(self, async_client):
+        response = await async_client.post(
+            PRESET,
+            json={
+                "name": "Insecure",
+                "trigger": CRON,
+                "improve": improve_config(
+                    repository_source="explicit",
+                    repositories=[{"label": "one", "url": "http://host/repo.git"}],
+                ),
+            },
+        )
+        assert response.status_code == 422
+
+
 class TestCycleReporting:
     """PATCH /v1/improve/cycles/{id} and the history the dashboard reads."""
 

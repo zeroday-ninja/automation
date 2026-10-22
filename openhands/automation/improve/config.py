@@ -21,6 +21,9 @@ from openhands.automation.improve.url import strip_credentials
 # can fall out of step with it.
 RepositorySource = Literal["git_sync", "explicit"]
 
+# What a run can actually clone: `RepoSource` in the SDK accepts exactly these.
+CLONEABLE_URL_PREFIXES = ("https://", "git@", "file://")
+
 MAX_REPOSITORIES = 50
 MAX_REVIEWERS = 4
 DEFAULT_BRANCH_PREFIX = "improve/"
@@ -57,10 +60,16 @@ class ExplicitRepository(BaseModel):
         server holds, so this URL never needs to carry one and nothing is lost
         by removing it.
         """
-        allowed = ("https://", "http://", "ssh://", "git@", "file://")
         v = v.strip()
-        if not v.startswith(allowed):
-            raise ValueError("url must start with one of: " + ", ".join(allowed))
+        if not v.startswith(CLONEABLE_URL_PREFIXES):
+            # Deliberately the same set the SDK's RepoSource accepts, no
+            # wider. A looser rule here only moves the failure from creation
+            # time, where the user is looking, to 3am inside a cycle. `http://`
+            # is refused rather than silently upgraded, and `git://` and
+            # `ssh://` are not cloneable by a run at all.
+            raise ValueError(
+                "url must start with one of: " + ", ".join(CLONEABLE_URL_PREFIXES)
+            )
         return strip_credentials(v)
 
 
