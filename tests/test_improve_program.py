@@ -676,7 +676,10 @@ class TestCycleReporting:
                     {
                         "runtime": "codex",
                         "verdict": "CHANGES_REQUESTED",
-                        "updates_checked": "Parser 3.2 is the latest release; nothing supersedes it.",
+                        "updates_checked": (
+                            "Parser 3.2 is the latest release; nothing "
+                            "supersedes it."
+                        ),
                         "summary": "The cited changelog covers a later version.",
                         "concerns": ["the pin does not match the cited release"],
                         "stale_sources": ["https://example.com/changelog"],

@@ -188,6 +188,17 @@ class TestChooseReviewers:
 
         assert report.choose_reviewers({}, only_builder, BUILDER) == []
 
+    def test_never_returns_the_builder_even_if_configured(self, report):
+        # The builder moves between cycles when the program rotates it, so a
+        # list that was valid when it was written can name this turn's
+        # builder. A runtime reviewing its own work is the one outcome this
+        # design exists to prevent.
+        chosen = report.choose_reviewers(
+            {"reviewer_profile_ids": [BUILDER, "c-1"]}, PROFILES, BUILDER
+        )
+
+        assert [reviewer["id"] for reviewer in chosen] == ["c-1"]
+
     def test_configured_reviewers_win_over_auto_selection(self, report):
         chosen = report.choose_reviewers(
             {"reviewer_profile_ids": ["c-2"]}, PROFILES, BUILDER
