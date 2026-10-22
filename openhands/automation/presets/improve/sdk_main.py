@@ -389,6 +389,36 @@ def normalize_sources(value) -> list[dict]:
     return sources
 
 
+def normalize_soul_suggestions(value) -> list[dict]:
+    """Coerce proposed SOUL.md additions into the cycle API's shape.
+
+    Capped and deduplicated: every entry is something a human has to read and
+    decide on, so a run that produces a wall of them has produced nothing.
+    """
+    if not isinstance(value, list):
+        return []
+    suggestions = []
+    seen = set()
+    for item in value[:10]:
+        if isinstance(item, str):
+            item = {"text": item}
+        if not isinstance(item, dict):
+            continue
+        text = clamp(item.get("text"), 2000)
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        suggestion = {"text": text}
+        why = clamp(item.get("why"), 2000)
+        if why:
+            suggestion["why"] = why
+        suggestions.append(suggestion)
+    return suggestions
+
+
 _VERDICTS = {
     "accepted": "ACCEPTED",
     "changes_requested": "CHANGES_REQUESTED",
@@ -666,6 +696,7 @@ def execute_cycle(workspace) -> None:
         )
         sources = normalize_sources(report.get("sources"))
         risks = string_list(report.get("risks"))
+        soul_suggestions = normalize_soul_suggestions(report.get("soul_suggestions"))
         pr_url = clamp(report.get("pr_url"), 2000)
         if pr_url and not pr_url.startswith(("http://", "https://")):
             pr_url = None
@@ -678,6 +709,8 @@ def execute_cycle(workspace) -> None:
             "branch": reported_branch,
             "sources": sources,
         }
+        if soul_suggestions:
+            builder_update["soul_suggestions"] = soul_suggestions
         if pr_url:
             builder_update["pr_url"] = pr_url
         report_cycle(builder_update)
@@ -776,15 +809,23 @@ def execute_cycle(workspace) -> None:
                     + string_list(review_report.get("newer_available")),
                 }
             )
+            soul_suggestions.extend(
+                normalize_soul_suggestions(review_report.get("soul_suggestions"))
+            )
             print(f"  verdict: {verdict}")
 
-        report_cycle(
-            {
-                "status": "COMPLETED",
-                "verdict": worst_verdict([review["verdict"] for review in reviews]),
-                "reviews": reviews,
-            }
-        )
+        final_update = {
+            "status": "COMPLETED",
+            "verdict": worst_verdict([review["verdict"] for review in reviews]),
+            "reviews": reviews,
+        }
+        if soul_suggestions:
+            # Deduplicated across stages: both runtimes noticing the same
+            # thing is one proposal for the user, not two.
+            final_update["soul_suggestions"] = normalize_soul_suggestions(
+                soul_suggestions
+            )
+        report_cycle(final_update)
         report_phase(f"{repo_label}: cycle complete")
     except Exception as exc:
         detail = f"{type(exc).__name__}: {exc}"

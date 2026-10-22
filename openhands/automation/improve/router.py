@@ -212,6 +212,10 @@ async def update_cycle(
         cycle.sources = [source.model_dump(mode="json") for source in body.sources]
     if "reviews" in updates and body.reviews is not None:
         cycle.reviews = [review.model_dump(mode="json") for review in body.reviews]
+    if "soul_suggestions" in updates and body.soul_suggestions is not None:
+        cycle.soul_suggestions = [
+            suggestion.model_dump(mode="json") for suggestion in body.soul_suggestions
+        ]
     if body.verdict is not None:
         cycle.verdict = body.verdict
     if body.status is not None:

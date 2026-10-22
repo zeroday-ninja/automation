@@ -69,7 +69,8 @@ Write exactly this JSON to `{{REVIEW_PATH}}`. Nothing else goes in that file.
   "stale_sources": ["URLs that are outdated, superseded, or do not support the claim attached to them"],
   "newer_available": ["Something newer or better than what was chosen, with the URL"],
   "checks": [{"command": "what you ran", "result": "pass | fail | skipped", "detail": "why, if not pass"}],
-  "verified_sources": ["URLs you opened and confirmed do support their claim"]
+  "verified_sources": ["URLs you opened and confirmed do support their claim"],
+  "soul_suggestions": [{"text": "a preference about how this user wants to be worked for", "why": "what in this review suggested it"}]
 }
 ```
 
@@ -83,6 +84,11 @@ Use the verdicts honestly:
   citation that does not hold.
 - `inconclusive` — you could not get far enough to judge. Say exactly what
   blocked you.
+
+`soul_suggestions` is optional and is about the *user*, not the project or the
+builder: a standing preference this review showed to be missing or ambiguous in
+the quoted SOUL.md. Leave it empty unless this cycle gave you real evidence,
+and never edit SOUL.md yourself — the user accepts or discards each proposal.
 
 Write the file even if you ran out of time. A missing verdict is read as
 `inconclusive`, which wastes the cycle.
