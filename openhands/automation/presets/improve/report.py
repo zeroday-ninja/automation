@@ -160,6 +160,25 @@ def worst_verdict(verdicts: list[str]) -> str:
     return max(verdicts, key=lambda verdict: _VERDICT_SEVERITY.get(verdict, 2))
 
 
+def acp_server_from_detail(payload) -> str | None:
+    """The ACP server named by a ``GET /api/agent-profiles/{name}`` response.
+
+    The agent server answers ``{"name": ..., "profile": {...}}``, but the
+    field has lived at the top level in other shapes of this API. Reading
+    both is the difference between knowing a review came from Codex and
+    recording the useless string "acp" — which is what the program exists to
+    tell apart.
+    """
+    if not isinstance(payload, dict):
+        return None
+    for candidate in (payload.get("profile"), payload):
+        if isinstance(candidate, dict):
+            server = candidate.get("acp_server")
+            if isinstance(server, str) and server.strip():
+                return server.strip()
+    return None
+
+
 def choose_reviewers(config: dict, profiles: dict, builder_id: str) -> list[dict]:
     """Which profiles review this cycle, and under which runtime.
 
