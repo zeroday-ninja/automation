@@ -1365,4 +1365,10 @@ async def create_improvement_program(
         },
     )
 
-    return AutomationResponse.model_validate(automation)
+    response = AutomationResponse.model_validate(automation)
+    # Committed before answering: `get_session` commits only after the response
+    # is sent, and a caller that reads the program straight back — the
+    # dashboard navigating to it, or a script claiming its first cycle — can
+    # otherwise beat the commit and get a 404 for what it just created.
+    await session.commit()
+    return response
