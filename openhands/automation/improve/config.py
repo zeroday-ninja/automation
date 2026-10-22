@@ -26,6 +26,7 @@ CLONEABLE_URL_PREFIXES = ("https://", "git@", "file://")
 
 MAX_REPOSITORIES = 50
 MAX_REVIEWERS = 4
+MAX_BUILDERS = 4
 DEFAULT_BRANCH_PREFIX = "improve/"
 DEFAULT_MAX_CHANGED_FILES = 20
 
@@ -82,7 +83,19 @@ class ImproveProgramConfig(BaseModel):
         ...,
         description=(
             "Agent profile that researches and implements the improvement. "
-            "Its runtime is the one the reviewers must differ from."
+            "Its runtime is the one the reviewers must differ from. When "
+            "`rotate_builder` is set, this is the first builder in the rotation."
+        ),
+    )
+    rotate_builder: list[uuid.UUID] = Field(
+        default_factory=list,
+        max_length=MAX_BUILDERS,
+        description=(
+            "Further profiles to take turns building, after "
+            "`builder_profile_id`. The point is not variety for its own sake: "
+            "with one fixed builder, that runtime never reviews anything. "
+            "Rotating the builder is what makes *each* runtime take a turn "
+            "attacking another's work. Empty keeps one builder."
         ),
     )
     reviewer_profile_ids: list[uuid.UUID] = Field(
@@ -180,9 +193,30 @@ class ImproveProgramConfig(BaseModel):
                 "the builder profile cannot also be a reviewer: a runtime "
                 "reviewing its own work is not independent review"
             )
+        if self.builder_profile_id in self.rotate_builder:
+            raise ValueError(
+                "builder_profile_id is already the first builder; list only "
+                "the profiles that follow it in rotate_builder"
+            )
+        if len(set(self.rotate_builder)) != len(self.rotate_builder):
+            raise ValueError("rotate_builder contains a duplicate")
+        if self.rotate_builder and self.reviewer_profile_ids:
+            # Naming reviewers explicitly while the builder moves is a trap:
+            # on the turn a named reviewer builds, it would be asked to review
+            # itself, which is the one thing this whole design refuses.
+            raise ValueError(
+                "rotate_builder cannot be combined with explicit "
+                "reviewer_profile_ids: leave reviewers empty so each turn's "
+                "reviewers are every runtime except that turn's builder"
+            )
         if len(set(self.reviewer_profile_ids)) != len(self.reviewer_profile_ids):
             raise ValueError("reviewer_profile_ids contains a duplicate")
         return self
+
+    @property
+    def builder_rotation(self) -> list[uuid.UUID]:
+        """Every profile that takes a turn building, in order."""
+        return [self.builder_profile_id, *self.rotate_builder]
 
     def to_metadata(self) -> dict[str, Any]:
         """Serialize for ``preset_metadata['improve']`` (JSON-safe)."""

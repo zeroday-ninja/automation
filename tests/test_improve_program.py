@@ -382,6 +382,55 @@ class TestRotation:
         assert await claim_label(async_client, program["id"]) == "beta"
 
 
+class TestRotatingTheBuilder:
+    """Every runtime takes a turn building, so every runtime takes a turn reviewing."""
+
+    async def test_each_builder_takes_a_turn_and_wraps(self, async_client):
+        # Arrange: one repository, two builders. The repository is constant so
+        # only the builder can vary.
+        await add_remote(async_client, "https://github.com/acme/alpha", "alpha")
+        program = await create_program(async_client, rotate_builder=[REVIEWER])
+
+        # Act
+        builders = []
+        for _ in range(3):
+            response = await claim(async_client, program["id"])
+            assert response.status_code == 201, response.text
+            builders.append(response.json()["cycle"]["builder_profile_id"])
+
+        # Assert: with a fixed builder, that runtime would never review
+        # anything. Taking turns is what puts each one on the other side.
+        assert builders == [BUILDER, REVIEWER, BUILDER]
+
+    async def test_rejects_naming_reviewers_while_the_builder_moves(self, async_client):
+        # On the turn a named reviewer builds, it would be asked to review
+        # itself.
+        response = await async_client.post(
+            PRESET,
+            json={
+                "name": "Self review by rotation",
+                "trigger": CRON,
+                "improve": improve_config(
+                    rotate_builder=[REVIEWER],
+                    reviewer_profile_ids=[REVIEWER],
+                ),
+            },
+        )
+        assert response.status_code == 422
+        assert "reviewer_profile_ids" in response.text
+
+    async def test_rejects_a_builder_listed_twice(self, async_client):
+        response = await async_client.post(
+            PRESET,
+            json={
+                "name": "Duplicate builder",
+                "trigger": CRON,
+                "improve": improve_config(rotate_builder=[BUILDER]),
+            },
+        )
+        assert response.status_code == 422
+
+
 class TestEditingAProgram:
     """PUT /v1/improve/{automation_id}/config."""
 
@@ -627,6 +676,7 @@ class TestCycleReporting:
                     {
                         "runtime": "codex",
                         "verdict": "CHANGES_REQUESTED",
+                        "updates_checked": "Parser 3.2 is the latest release; nothing supersedes it.",
                         "summary": "The cited changelog covers a later version.",
                         "concerns": ["the pin does not match the cited release"],
                         "stale_sources": ["https://example.com/changelog"],
@@ -642,6 +692,9 @@ class TestCycleReporting:
         assert body["builder_runtime"] == "claude-code"
         assert body["sources"][0]["url"] == "https://example.com/changelog"
         assert body["reviews"][0]["runtime"] == "codex"
+        # Recorded every cycle, including when the answer is "nothing newer":
+        # saying nothing and having checked are different statements.
+        assert "latest release" in body["reviews"][0]["updates_checked"]
         assert body["completed_at"] is not None
 
         stored = (

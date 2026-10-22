@@ -156,6 +156,18 @@ def cycle_request(method: str, path: str, payload: dict | None = None) -> dict:
     return response.json()
 
 
+def _no_updates_answer(error: str | None) -> str | None:
+    """What to record when a reviewer skipped the supersession question.
+
+    Not left empty: an empty field reads as "nothing to report", and the whole
+    point of asking every time is that "we looked and it is current" and "we
+    did not look" are different answers.
+    """
+    if error:
+        return None
+    return "This reviewer did not say whether anything newer supersedes this."
+
+
 def _no_verdict_summary(error: str | None) -> str:
     """What to record when a reviewer left no verdict behind."""
     if error:
@@ -684,6 +696,8 @@ def execute_cycle(workspace) -> None:
                     "concerns": string_list(review_report.get("concerns")),
                     "stale_sources": string_list(review_report.get("stale_sources"))
                     + string_list(review_report.get("newer_available")),
+                    "updates_checked": clamp(review_report.get("updates_checked"))
+                    or _no_updates_answer(review_error),
                 }
             )
             soul_suggestions.extend(

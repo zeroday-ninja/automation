@@ -144,6 +144,32 @@ async def latest_cycle(
     return result.scalars().first()
 
 
+def next_builder(
+    builders: list,
+    previous: AutomationImproveCycle | None,
+):
+    """Whose turn it is to build.
+
+    Derived from the last cycle's builder, the same way the repository is
+    derived from the last cycle's repository: one fact, no second counter to
+    drift. A builder that has been removed from the rotation simply does not
+    match, and the turn falls to the first.
+
+    Rotating the builder is what lets *every* runtime review. With one fixed
+    builder, that runtime only ever writes and never attacks anyone else's
+    work.
+    """
+    if not builders:
+        raise NoRepositoriesError("the program has no builder")
+    if previous is None or previous.builder_profile_id is None:
+        return builders[0]
+    try:
+        position = builders.index(previous.builder_profile_id)
+    except ValueError:
+        return builders[0]
+    return builders[(position + 1) % len(builders)]
+
+
 def next_index(
     repositories: list[RotationRepository],
     previous: AutomationImproveCycle | None,
@@ -193,7 +219,7 @@ async def claim_next_cycle(
         repo_ref=chosen.ref,
         remote_id=chosen.remote_id,
         status=ImproveCycleStatus.CLAIMED,
-        builder_profile_id=config.builder_profile_id,
+        builder_profile_id=next_builder(config.builder_rotation, previous),
         created_at=utcnow(),
         updated_at=utcnow(),
     )

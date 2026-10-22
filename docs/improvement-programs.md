@@ -23,6 +23,11 @@ two different runtimes fail differently, so the second one is worth asking. The
 verdict `SINGLE_RUNTIME` exists to record when that did not happen, and it is
 deliberately not a pass.
 
+**"Nothing newer" is an answer, not a silence.** Every review records
+`updates_checked`: what it compared the change against and what it found, even
+when nothing supersedes the approach. An empty field is indistinguishable from
+not having looked, and that distinction is the whole value of asking.
+
 **Cited sources are the unit of evidence.** The builder must record the URL
 behind every claim its change rests on, and the reviewer's *first* job is to
 open each one and check it says what the change says it says. A citation that
@@ -68,6 +73,7 @@ run take another.
 |---|---|
 | `builder_profile_id` | The profile that researches and implements. Its runtime is the one reviewers must differ from. |
 | `reviewer_profile_ids` | Explicit reviewers. **Empty means auto**: each run picks one profile per runtime other than the builder's, so adding a second runtime to the server is enough to turn review on. |
+| `rotate_builder` | Further profiles that take turns building, after `builder_profile_id`. With one fixed builder, that runtime never reviews anything; rotating is what puts *every* runtime on the attacking side in turn. Cannot be combined with explicit reviewers, because on the turn a named reviewer builds it would be asked to review itself. |
 | `repository_source` | `git_sync` (the org's synced repositories) or `explicit`. |
 | `repositories` | The rotation when the source is `explicit`. |
 | `repository_labels` | Optional filter over Git Sync remotes by label. |
