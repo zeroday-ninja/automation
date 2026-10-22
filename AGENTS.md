@@ -339,9 +339,11 @@ the rotation must not reshuffle underneath a running program.
 #### Configuration lives on the automation, not in the tarball
 
 `preset_metadata["improve"]` holds `ImproveProgramConfig` and the claim
-response returns it, so editing a program takes effect on its next run without
-regenerating its code. The tarball carries only `main.py`, `setup.sh` and the
-two prompt templates.
+response returns it, so editing a program through
+`PUT /v1/improve/{automation_id}/config` takes effect on its next cycle without
+regenerating its code. A cycle already running is unaffected: it works from the
+configuration it claimed with. The tarball carries only `main.py`, `report.py`,
+`setup.sh` and the two prompt templates.
 
 #### Files
 
@@ -358,6 +360,7 @@ two prompt templates.
 | `POST /v1/preset/improve` | Canvas, to create a program |
 | `POST /v1/improve/{automation_id}/claim` | a run, once, before any agent work |
 | `PATCH /v1/improve/cycles/{cycle_id}` | a run, after each stage |
+| `PUT /v1/improve/{automation_id}/config` | Canvas, to change a program (needs `manage_automations`) |
 | `GET /v1/improve/{automation_id}/rotation` | the dashboard |
 | `GET /v1/improve/{automation_id}/cycles` | the dashboard |
 
