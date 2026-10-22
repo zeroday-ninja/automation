@@ -115,6 +115,22 @@ and "we could not finish" is exactly what these verdicts exist to keep apart.
 sources" is a successful cycle, and keeping it distinct from a silent failure is
 how you tell a program that is working from one that is idling.
 
+## When a reviewer does not finish
+
+A reviewer that fails is recorded as `INCONCLUSIVE` **with the reason and with
+its conversation id** when one exists. The common cause is not a bad model but
+an unreachable one — a local inference server that is not running answers with
+an HTML error page. A silent "no readable verdict" sends the user looking in
+the wrong place.
+
+## Updating a program's code
+
+A program's runner is packaged at creation. `POST
+/v1/improve/{automation_id}/refresh-code` repackages it from the preset on
+disk, in place. Recreating the program instead would delete its cycle history,
+and the history is the rotation cursor, so that would silently rewind the
+rotation to the first repository.
+
 ## Learned preferences
 
 A cycle may report `soul_suggestions`: things it learned about how the *user*

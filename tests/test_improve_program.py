@@ -498,6 +498,56 @@ class TestRepositoryUrls:
         assert "s3cret" not in claimed.text
 
 
+class TestRefreshingProgramCode:
+    """POST /v1/improve/{automation_id}/refresh-code."""
+
+    async def test_repackages_without_touching_configuration_or_history(
+        self, async_client, async_session
+    ):
+        # Arrange: a program with a cycle behind it, so the rotation cursor
+        # has somewhere to be lost from.
+        for label in ("alpha", "beta"):
+            await add_remote(async_client, f"https://github.com/acme/{label}", label)
+        program = await create_program(async_client, focus="Keep it small.")
+        assert await claim_label(async_client, program["id"]) == "alpha"
+        before = (
+            (
+                await async_session.execute(
+                    select(Automation).where(Automation.id == uuid.UUID(program["id"]))
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert before is not None
+        original_tarball = before.tarball_path
+
+        # Act
+        response = await async_client.post(
+            f"/api/automation/v1/improve/{program['id']}/refresh-code"
+        )
+
+        # Assert: new code, same program. Recreating it instead would rewind
+        # the rotation to the first repository, because the history is the
+        # cursor.
+        assert response.status_code == 200, response.text
+        assert response.json()["tarball_path"] != original_tarball
+        assert response.json()["preset_metadata"]["improve"]["focus"] == (
+            "Keep it small."
+        )
+        assert await claim_label(async_client, program["id"]) == "beta"
+
+    async def test_another_org_cannot_refresh(self, async_client, as_other_org):
+        await add_remote(async_client, "https://github.com/acme/alpha", "alpha")
+        program = await create_program(async_client)
+
+        as_other_org()
+        response = await async_client.post(
+            f"/api/automation/v1/improve/{program['id']}/refresh-code"
+        )
+        assert response.status_code == 404
+
+
 class TestRepositoryUrlSchemes:
     """Only URLs a cycle can actually clone are accepted."""
 

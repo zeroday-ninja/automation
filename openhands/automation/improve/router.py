@@ -42,9 +42,14 @@ from openhands.automation.models import (
     AutomationImproveCycle,
     AutomationRun,
     ImproveCycleStatus,
+    TarballUpload,
+    UploadStatus,
 )
+from openhands.automation.schemas import AutomationResponse
+from openhands.automation.storage import FileStore, get_file_store
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.model_profiles import ensure_agent_profile_exists
+from openhands.automation.utils.tarball_validation import build_internal_url
 
 
 logger = logging.getLogger(__name__)
@@ -299,6 +304,74 @@ async def replace_program_config(
     )
     # Committed before answering, as `claim_cycle` explains: a caller may
     # claim against the configuration it has just set.
+    await session.commit()
+    return response
+
+
+@router.post("/{automation_id}/refresh-code")
+async def refresh_program_code(
+    automation_id: uuid.UUID,
+    user: AuthenticatedUser = Depends(_require_manage_automations),
+    session: AsyncSession = Depends(get_session),
+    file_store: FileStore = Depends(get_file_store),
+) -> AutomationResponse:
+    """Repackage the program's runner from the preset code on disk.
+
+    A program's code is packaged when it is created, so a fix to the preset
+    reaches only programs created afterwards. That turned every preset fix into
+    "delete your programs and build them again", which costs the user their
+    cycle history — and the history *is* the rotation cursor, so rebuilding a
+    program silently rewinds it to the first repository.
+
+    This repackages in place. Configuration is untouched (a run reads it from
+    the claim), and the next cycle runs the new code. A cycle already running
+    is unaffected: its code was unpacked when it started.
+    """
+    automation, _ = await _load_program(session, automation_id, user)
+
+    # Imported here: `preset_router` imports this module's router, so a
+    # module-level import would close the cycle.
+    from openhands.automation.preset_router import (
+        _build_storage_path,
+        _bytes_to_async_iter,
+        _generate_improve_tarball,
+    )
+
+    upload_id = uuid.uuid4()
+    storage_path = _build_storage_path(user.org_id, user.user_id, upload_id)
+    upload = TarballUpload(
+        id=upload_id,
+        user_id=user.user_id,
+        org_id=user.org_id,
+        name=f"improve-program-refresh-{str(automation.id)[:8]}",
+        description="Repackaged improvement-program runner",
+        status=UploadStatus.UPLOADING,
+        storage_path=storage_path,
+    )
+    session.add(upload)
+    await session.flush()
+
+    try:
+        upload.size_bytes = await file_store.write_stream(
+            path=storage_path,
+            stream=_bytes_to_async_iter(_generate_improve_tarball()),
+            content_type="application/x-tar",
+        )
+        upload.status = UploadStatus.COMPLETED
+    except Exception as exc:
+        upload.status = UploadStatus.FAILED
+        upload.error_message = f"Upload failed: {exc!s}"
+        await session.flush()
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload tarball: {exc!s}",
+        ) from exc
+
+    automation.tarball_path = build_internal_url(upload_id)
+    automation.updated_at = utcnow()
+    await session.flush()
+    await session.refresh(automation)
+    response = AutomationResponse.model_validate(automation)
     await session.commit()
     return response
 
