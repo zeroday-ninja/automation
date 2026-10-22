@@ -458,6 +458,32 @@ class TestCycleReporting:
         assert stored.status is ImproveCycleStatus.COMPLETED
         assert stored.verdict is ImproveVerdict.CHANGES_REQUESTED
 
+    async def test_records_proposed_additions_to_the_users_soul(self, async_client):
+        # Arrange
+        program, cycle_id = await self._claimed_cycle(async_client)
+
+        # Act: a cycle proposes a standing preference it had to guess at.
+        response = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "status": "COMPLETED",
+                "verdict": "ACCEPTED",
+                "soul_suggestions": [
+                    {
+                        "text": "Run the project's own lint before pushing.",
+                        "why": "the repository enforces it and SOUL.md is silent",
+                    }
+                ],
+            },
+        )
+
+        # Assert: it is recorded as a proposal for the user to decide on, and
+        # the cycle does not claim to have changed SOUL.md itself.
+        assert response.status_code == 200, response.text
+        suggestions = response.json()["soul_suggestions"]
+        assert len(suggestions) == 1
+        assert suggestions[0]["why"].startswith("the repository enforces it")
+
     async def test_a_finished_cycle_cannot_be_rewritten(self, async_client):
         program, cycle_id = await self._claimed_cycle(async_client)
         first = await async_client.patch(

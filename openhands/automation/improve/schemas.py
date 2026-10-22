@@ -16,6 +16,7 @@ from openhands.automation.models import (
 
 MAX_SOURCES = 40
 MAX_REVIEWS = 8
+MAX_SOUL_SUGGESTIONS = 10
 MAX_SUMMARY = 20000
 
 
@@ -75,6 +76,29 @@ class CycleReview(BaseModel):
     )
 
 
+class SoulSuggestion(BaseModel):
+    """Something a cycle learned about how the user wants to be worked for.
+
+    A proposal for the user's SOUL.md, never an edit to it: the document that
+    tells every future run what the user wants is not something a run may
+    rewrite on its own.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description="The preference, written as the user would want it stated.",
+    )
+    why: str | None = Field(
+        default=None,
+        max_length=2000,
+        description="What in this cycle suggested it, so the user can judge it.",
+    )
+
+
 class ClaimCycleRequest(BaseModel):
     """A run asking for the next repository in the rotation."""
 
@@ -100,6 +124,9 @@ class UpdateCycleRequest(BaseModel):
     pr_url: str | None = Field(default=None, max_length=2000)
     sources: list[CitedSource] | None = Field(default=None, max_length=MAX_SOURCES)
     reviews: list[CycleReview] | None = Field(default=None, max_length=MAX_REVIEWS)
+    soul_suggestions: list[SoulSuggestion] | None = Field(
+        default=None, max_length=MAX_SOUL_SUGGESTIONS
+    )
     error: str | None = Field(default=None, max_length=MAX_SUMMARY)
 
     @field_validator("pr_url")
@@ -133,6 +160,7 @@ class CycleResponse(BaseModel):
     pr_url: str | None
     sources: list[dict[str, Any]]
     reviews: list[dict[str, Any]]
+    soul_suggestions: list[dict[str, Any]]
     error: str | None
     created_at: datetime
     updated_at: datetime
@@ -162,6 +190,7 @@ class CycleResponse(BaseModel):
             pr_url=cycle.pr_url,
             sources=cycle.sources or [],
             reviews=cycle.reviews or [],
+            soul_suggestions=cycle.soul_suggestions or [],
             error=cycle.error,
             created_at=cycle.created_at,
             updated_at=cycle.updated_at,

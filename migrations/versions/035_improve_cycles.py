@@ -74,6 +74,7 @@ def upgrade() -> None:
         sa.Column("pr_url", sa.Text(), nullable=True),
         sa.Column("sources", sa.JSON(), nullable=True),
         sa.Column("reviews", sa.JSON(), nullable=True),
+        sa.Column("soul_suggestions", sa.JSON(), nullable=True),
         sa.Column("error", sa.Text(), nullable=True),
         sa.Column(
             "created_at",

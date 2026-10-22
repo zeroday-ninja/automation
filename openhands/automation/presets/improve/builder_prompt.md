@@ -100,7 +100,8 @@ Write exactly this JSON to `{{REPORT_PATH}}`. Nothing else goes in that file.
   "checks": [{"command": "what you ran", "result": "pass | fail | skipped", "detail": "why, if not pass"}],
   "sources": [{"url": "https://...", "title": "what it is", "note": "the specific claim in this change that this source supports"}],
   "followups": ["something you deliberately did not do"],
-  "risks": ["what a reviewer should attack first"]
+  "risks": ["what a reviewer should attack first"],
+  "soul_suggestions": [{"text": "a preference, as the user would want it stated", "why": "what in this cycle suggested it"}]
 }
 ```
 
@@ -111,5 +112,13 @@ Rules for the report:
 - `risks` is where you are honest. Name the weakest part of your own change.
   A reviewer on another runtime is about to look for it, and a cycle that
   hides its weak point fails on the next step rather than this one.
+- `soul_suggestions` is for things you learned about *how this user wants to
+  be worked for*, not about the project. Add an entry only when this cycle
+  gave you real evidence: a convention the repository enforces that the user's
+  standing preferences do not mention, a decision you had to guess at, or a
+  preference the quoted SOUL.md states ambiguously enough that you had to pick
+  an interpretation. Leave it empty rather than padding it — each entry is
+  something a human has to read and decide on. Never try to edit SOUL.md
+  yourself; these are proposals the user accepts or discards.
 - Write the file even if the cycle failed. A missing report is the one outcome
   that cannot be reviewed.

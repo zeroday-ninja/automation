@@ -1094,6 +1094,15 @@ class AutomationImproveCycle(Base):
     # ``{profile_id, runtime, conversation_id, verdict, concerns, summary}``.
     reviews: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
 
+    # Things this cycle learned about how the *user* wants to be worked for,
+    # as ``{text, why}`` entries proposed for their SOUL.md. Proposals only:
+    # a program may notice a preference, but it may not quietly rewrite the
+    # document that tells every future run what the user wants. The user
+    # accepts or discards each one.
+    soul_suggestions: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSON, nullable=True
+    )
+
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
