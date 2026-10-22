@@ -173,11 +173,18 @@ async def claim_cycle(
         # its rotation yet. The run reports this as a clean no-op.
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    return ClaimCycleResponse(
+    response = ClaimCycleResponse(
         cycle=CycleResponse.of(cycle),
         config=config,
         rotation=_rotation_entries(repositories),
     )
+    # Commit before answering. `get_session` commits only *after* the response
+    # is sent, and the caller is a run that reports against this cycle id as
+    # its next act — on SQLite that next request can beat the commit and get a
+    # 404 for a cycle it was just handed. Other handlers that hand out an
+    # identifier commit here for the same reason.
+    await session.commit()
+    return response
 
 
 @router.patch("/cycles/{cycle_id}")
@@ -229,7 +236,11 @@ async def update_cycle(
 
     await session.flush()
     await session.refresh(cycle)
-    return CycleResponse.of(cycle)
+    response = CycleResponse.of(cycle)
+    # Committed before answering, for the reason given in `claim_cycle`: the
+    # caller reports the stages of one cycle in sequence.
+    await session.commit()
+    return response
 
 
 @router.put("/{automation_id}/config")
@@ -280,12 +291,16 @@ async def replace_program_config(
         upcoming: int | None = next_index(repositories, previous)
     except NoRepositoriesError:
         upcoming = None
-    return RotationResponse(
+    response = RotationResponse(
         repositories=_rotation_entries(repositories),
         next_index=upcoming,
         last_cycle=CycleResponse.of(previous) if previous is not None else None,
         config=body,
     )
+    # Committed before answering, as `claim_cycle` explains: a caller may
+    # claim against the configuration it has just set.
+    await session.commit()
+    return response
 
 
 @router.get("/{automation_id}/rotation")
