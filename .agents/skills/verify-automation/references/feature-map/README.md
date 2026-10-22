@@ -10,7 +10,7 @@ recipe.
 
 Maintenance baseline: `7cda26ab0f60158a2a6dc74964e9aaf84008e04a` (first pass, 2026-10-12).
 
-The map has **274 sub-features**.
+The map has **297 sub-features**.
 
 ## Baseline preconditions
 
@@ -94,6 +94,7 @@ them honest: [../maintenance.md](../maintenance.md).
 | F16 | [The run's contract with the Agent Server](F16-agent-server-contract.md) | bash command and output, uploads cleanup, conversation tags, model profiles, agent-server failures | Agent Server `/api/...` | baseline; `llm`, `pypi` | 8 |
 | F17 | [Stream sources (Slack Socket Mode)](F17-stream-sources.md) | stream supervisor, config parsing, retries, kill switch, Socket Mode delivery | the stream supervisor (no route) | baseline; a real Slack app for two blocked bullets | 7 |
 | F18 | [Git sync remotes and assignments](F18-git-sync-remotes.md) | several repositories per org, the default remote, adoption of unassigned automations, per-remote check, trigger and pause, moving automations between remotes, deletes, the legacy routes as the default's second entry point | `/v1/git-sync/remotes`, `/v1/git-sync/remotes/{id}/...`, `/v1/git-sync/assignments` | `git` | 16 |
+| F19 | [Improvement programs](F19-improve-programs.md) | the improve preset and its runner, the program configuration and its replacement, the repository rotation (git sync remotes or an explicit list), claiming a cycle, reporting the builder and the adversarial review, cycle history | `/v1/preset/improve`, `/v1/improve/{id}/claim`, `/v1/improve/cycles/{id}`, `/v1/improve/{id}/config`, `/v1/improve/{id}/rotation`, `/v1/improve/{id}/cycles` | `git` | 23 |
 
 ## Not mapped
 
