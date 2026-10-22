@@ -515,7 +515,15 @@ def execute_cycle(workspace) -> None:
         # --- Resolve the runtimes taking part ------------------------------
         print("\n=== RUNTIMES ===")
         profiles = list_agent_profiles(workspace)
-        builder_id = str(config["builder_profile_id"])
+        # The *claim* decides whose turn it is to build, because the rotation
+        # lives in the history. Reading the configuration here instead meant
+        # that with `rotate_builder` set, the cycle recorded one builder and
+        # ran another — and the reviewers were then chosen to exclude the
+        # wrong runtime, so a cycle reviewed its own work. The config value is
+        # only the fallback for a server too old to send one.
+        builder_id = str(
+            cycle.get("builder_profile_id") or config["builder_profile_id"]
+        )
         builder = profiles.get(builder_id) or {}
         builder_runtime = builder.get("runtime")
         reviewers = choose_reviewers(config, profiles, builder_id)

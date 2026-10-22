@@ -194,6 +194,12 @@ def choose_reviewers(config: dict, profiles: dict, builder_id: str) -> list[dict
     if configured:
         chosen = []
         for profile_id in configured:
+            if profile_id == builder_id:
+                # Belt and braces. The config validator refuses this, but the
+                # builder can also move between cycles, and a runtime
+                # reviewing its own work is the one outcome this whole design
+                # exists to prevent.
+                continue
             profile = profiles.get(profile_id)
             if profile is None:
                 # Keep it: the server may simply not have listed it. The
