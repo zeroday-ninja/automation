@@ -122,6 +122,7 @@ from openhands.workspace import OpenHandsCloudWorkspace  # noqa: E402
 from report import (  # noqa: E402
     MAX_SUMMARY_CHARS,
     acp_server_from_detail,
+    cycle_verdict,
     choose_reviewers,
     clamp,
     normalize_sources,
@@ -699,6 +700,9 @@ def execute_cycle(workspace) -> None:
                     "runtime": reviewer["runtime"],
                     "conversation_id": review_conversation_id,
                     "verdict": verdict,
+                    # Recorded so the aggregate can tell "judged it and was
+                    # unsure" from "never got to look".
+                    "failed": review_error is not None,
                     "summary": clamp(review_report.get("summary"))
                     or _no_verdict_summary(review_error),
                     "concerns": string_list(review_report.get("concerns")),
@@ -715,7 +719,7 @@ def execute_cycle(workspace) -> None:
 
         final_update = {
             "status": "COMPLETED",
-            "verdict": worst_verdict([review["verdict"] for review in reviews]),
+            "verdict": cycle_verdict(reviews),
             "reviews": reviews,
         }
         if soul_suggestions:

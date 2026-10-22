@@ -66,6 +66,15 @@ class CycleReview(BaseModel):
     verdict: ImproveVerdict | None = None
     summary: str | None = Field(default=None, max_length=MAX_SUMMARY)
     concerns: list[str] = Field(default_factory=list, max_length=40)
+    failed: bool = Field(
+        default=False,
+        description=(
+            "True when this reviewer never produced a judgement — an "
+            "unreachable server, a stuck conversation. Recorded and shown, "
+            "but it does not vote on the cycle's verdict: a runtime that "
+            "did not look must not outrank one that did."
+        ),
+    )
     updates_checked: str | None = Field(
         default=None,
         max_length=MAX_SUMMARY,
