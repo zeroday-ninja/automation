@@ -84,12 +84,31 @@ file.
 }
 ```
 
+## Before you choose a verdict: is it a defect or an improvement?
+
+A **defect** is something that is wrong: it fails, it is unsafe, it claims
+something untrue, or it rests on a source that does not support it. An
+**improvement** is something that could be better: more coverage, a clearer
+structure, a case you would also have handled.
+
+**Only defects block.** If what remains is a list of improvements, the verdict
+is `accepted` and the improvements go in `concerns` for whoever reads this
+next. A reviewer asked to attack can always find something, and a loop where
+every round produces a new suggestion never ends — the change gets worse from
+churn, not better.
+
+Be especially careful of this on documentation and prose, where every sentence
+is arguable. Ask whether a reader following this would be *wrong*, not whether
+you would have written it differently. If a previous round already made a
+change at your request and the result is now sound, say so and accept it.
+
 Use the verdicts honestly:
 
-- `accepted` — you looked for problems and did not find one worth acting on.
-  Say what you verified, so this is a statement and not a shrug.
-- `changes_requested` — the change is worth keeping once the concerns are
-  addressed.
+- `accepted` — you looked for defects and did not find one. Remaining
+  suggestions belong in `concerns`, not in a refusal. Say what you verified,
+  so this is a statement and not a shrug.
+- `changes_requested` — there is a **defect**: name it, and say what breaks and
+  when. Not for "this could be better".
 - `rejected` — it should not land: wrong, off mission, or resting on a
   citation that does not hold.
 - `inconclusive` — you could not get far enough to judge. Say exactly what

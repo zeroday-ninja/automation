@@ -106,7 +106,7 @@ credential the agent server holds, so the URL never needs one.
 | Verdict | Meaning |
 |---|---|
 | `ACCEPTED` | A second runtime looked for problems and did not find one worth acting on. |
-| `CHANGES_REQUESTED` | Worth keeping once the concerns are addressed. |
+| `CHANGES_REQUESTED` | There is a **defect**: something wrong, unsafe, untrue, or resting on a source that does not support it. Not "this could be better". |
 | `REJECTED` | Should not land: wrong, off mission, or resting on a citation that does not hold. |
 | `INCONCLUSIVE` | A reviewer could not get far enough to judge. |
 | `SINGLE_RUNTIME` | Built, but nothing independent judged it — no other runtime was available, or every reviewer failed. Not a pass. |
@@ -129,6 +129,20 @@ absolute path. The clone happens on the service's filesystem; the agent may be
 in a Docker sandbox that mounts the same workspace somewhere else. Naming the
 absolute path sends it looking for a directory that does not exist, and a cycle
 reported exactly that: it had to guess where its report belonged.
+
+## Only defects block
+
+A reviewer asked to attack can always find something, so the prompt draws the
+line explicitly: a *defect* is something wrong, and an *improvement* is
+something that could be better. Only defects produce
+`CHANGES_REQUESTED`; remaining suggestions go in `concerns` alongside an
+`ACCEPTED`.
+
+Without that line the loop does not terminate on anything arguable. A real
+case: a documentation change went six rounds, with round five calling it too
+procedural and round six calling the compressed result too thin — each finding
+true, and the author oscillating between them. Narrow code changes converged
+in one round over the same period.
 
 ## A reviewer that failed does not vote
 
