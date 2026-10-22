@@ -338,6 +338,11 @@ the rotation must not reshuffle underneath a running program.
 
 #### Configuration lives on the automation, not in the tarball
 
+A program's *code* is packaged when it is created, so a preset fix reaches
+only later programs. `POST /v1/improve/{automation_id}/refresh-code`
+repackages in place — recreating the program instead would throw away its cycle
+history, and the history *is* the rotation cursor.
+
 `preset_metadata["improve"]` holds `ImproveProgramConfig` and the claim
 response returns it, so editing a program through
 `PUT /v1/improve/{automation_id}/config` takes effect on its next cycle without
@@ -361,6 +366,7 @@ configuration it claimed with. The tarball carries only `main.py`, `report.py`,
 | `POST /v1/improve/{automation_id}/claim` | a run, once, before any agent work |
 | `PATCH /v1/improve/cycles/{cycle_id}` | a run, after each stage |
 | `PUT /v1/improve/{automation_id}/config` | Canvas, to change a program (needs `manage_automations`) |
+| `POST /v1/improve/{automation_id}/refresh-code` | repackage the runner from the preset on disk (needs `manage_automations`) |
 | `GET /v1/improve/{automation_id}/rotation` | the dashboard |
 | `GET /v1/improve/{automation_id}/cycles` | the dashboard |
 

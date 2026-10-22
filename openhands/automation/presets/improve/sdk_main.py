@@ -156,6 +156,16 @@ def cycle_request(method: str, path: str, payload: dict | None = None) -> dict:
     return response.json()
 
 
+def _no_verdict_summary(error: str | None) -> str:
+    """What to record when a reviewer left no verdict behind."""
+    if error:
+        return f"This reviewer did not finish: {error}"[:MAX_SUMMARY_CHARS]
+    return (
+        "This reviewer finished without writing a verdict, so nothing it "
+        "found was recorded."
+    )
+
+
 def read_doc(path: str) -> str | None:
     """Read a context document, or None when it is absent or unreadable."""
     try:
@@ -278,13 +288,31 @@ def list_agent_profiles(workspace) -> dict:
     return profiles
 
 
+class ConversationFailed(Exception):
+    """A conversation was created but did not finish.
+
+    Carries the conversation id, because the most useful thing about a failed
+    review is being able to open it and see what the runtime actually said.
+    """
+
+    def __init__(self, conversation_id: str | None, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.conversation_id = conversation_id
+        self.cause = cause
+
+
 def run_conversation(
     workspace,
     profile_id: str,
     prompt: str,
     title: str,
 ) -> str | None:
-    """Run one agent-profile conversation to completion. Returns its id."""
+    """Run one agent-profile conversation to completion. Returns its id.
+
+    A failure after the conversation exists raises ``ConversationFailed``
+    carrying that id, so a caller can record where it went wrong rather than
+    only that it did.
+    """
     request_kwargs = {
         "workspace": LocalWorkspace(working_dir=workspace.working_dir),
         "agent_profile_id": uuid.UUID(profile_id),
@@ -322,6 +350,8 @@ def run_conversation(
     try:
         conversation.send_message(prompt)
         conversation.run()
+    except Exception as exc:
+        raise ConversationFailed(str(conversation.id), exc) from exc
     finally:
         try:
             conversation.close()
@@ -610,6 +640,7 @@ def execute_cycle(workspace) -> None:
                 },
             )
             review_conversation_id = None
+            review_error = None
             try:
                 review_conversation_id = run_conversation(
                     workspace,
@@ -619,8 +650,14 @@ def execute_cycle(workspace) -> None:
                 )
             except Exception as exc:
                 # One reviewer failing must not discard the others or the
-                # builder's work; it is recorded as an inconclusive review.
-                print(f"  reviewer {label} failed (non-fatal): {exc}")
+                # builder's work; it is recorded as an inconclusive review —
+                # but with the reason, and with the conversation when there
+                # was one. A silent "no readable verdict" sends the user
+                # looking for a bad model when the real answer is that its
+                # server was not running.
+                review_conversation_id = getattr(exc, "conversation_id", None)
+                review_error = f"{type(exc).__name__}: {exc}"
+                print(f"  reviewer {label} failed (non-fatal): {review_error}")
 
             review_report = read_json_report(review_path) or {}
             verdict = normalize_verdict(review_report.get("verdict"))
@@ -632,7 +669,7 @@ def execute_cycle(workspace) -> None:
                     "conversation_id": review_conversation_id,
                     "verdict": verdict,
                     "summary": clamp(review_report.get("summary"))
-                    or "This reviewer produced no readable verdict.",
+                    or _no_verdict_summary(review_error),
                     "concerns": string_list(review_report.get("concerns")),
                     "stale_sources": string_list(review_report.get("stale_sources"))
                     + string_list(review_report.get("newer_available")),
