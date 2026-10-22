@@ -12,6 +12,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from openhands.automation.improve.url import strip_credentials
+
 
 # A program may rotate over every repository the org syncs, or over an
 # explicit list. "git_sync" is the normal case: the user already told Git Sync
@@ -31,17 +33,35 @@ class ExplicitRepository(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     label: str = Field(..., min_length=1, max_length=255)
-    url: str = Field(..., min_length=1, max_length=2000)
+    url: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description=(
+            "Clone URL. Any embedded username or password is dropped: a cycle "
+            "clones with a credential the agent server holds."
+        ),
+    )
     ref: str | None = Field(default=None, max_length=255)
 
     @field_validator("url")
     @classmethod
     def validate_url(cls, v: str) -> str:
-        """Only remote git URLs a run can actually clone."""
+        """Only remote git URLs a run can clone, and never with a credential.
+
+        An embedded username or password is dropped rather than rejected. It
+        would otherwise be stored in the automation's metadata, exported to the
+        Git Sync repository along with it, and shown in the dashboard — and
+        rejecting it would echo the secret back in the validation error, which
+        is how it would reach logs. A cycle clones with a credential the agent
+        server holds, so this URL never needs to carry one and nothing is lost
+        by removing it.
+        """
         allowed = ("https://", "http://", "ssh://", "git@", "file://")
+        v = v.strip()
         if not v.startswith(allowed):
             raise ValueError("url must start with one of: " + ", ".join(allowed))
-        return v
+        return strip_credentials(v)
 
 
 class ImproveProgramConfig(BaseModel):

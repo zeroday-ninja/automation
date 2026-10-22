@@ -12,12 +12,13 @@ Two kinds of caller share it:
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import AuthenticatedUser, require_permission
 from openhands.automation.db import get_session
+from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.improve.config import ImproveProgramConfig
 from openhands.automation.improve.rotation import (
     NoRepositoriesError,
@@ -43,6 +44,7 @@ from openhands.automation.models import (
     ImproveCycleStatus,
 )
 from openhands.automation.utils import utcnow
+from openhands.automation.utils.model_profiles import ensure_agent_profile_exists
 
 
 logger = logging.getLogger(__name__)
@@ -50,6 +52,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/improve", tags=["Improvement programs"])
 
 _require_view_automations = require_permission("view_automations")
+_require_manage_automations = require_permission("manage_automations")
 
 # A terminal cycle is history. Re-reporting one would let a late or retried
 # callback overwrite a recorded result, so the write is refused instead.
@@ -227,6 +230,62 @@ async def update_cycle(
     await session.flush()
     await session.refresh(cycle)
     return CycleResponse.of(cycle)
+
+
+@router.put("/{automation_id}/config")
+async def replace_program_config(
+    automation_id: uuid.UUID,
+    body: ImproveProgramConfig,
+    request: Request,
+    user: AuthenticatedUser = Depends(_require_manage_automations),
+    session: AsyncSession = Depends(get_session),
+) -> RotationResponse:
+    """Change what a program does from its next cycle onwards.
+
+    A whole-config replacement rather than a patch: the configuration is small,
+    its fields constrain each other (a repository source and its list, a
+    builder and its reviewers), and a partial update would have to re-validate
+    the merged result anyway.
+
+    Takes effect on the next run and does not touch the program's packaged
+    code, because a run reads its configuration from the claim response rather
+    than from its tarball. A cycle already running is unaffected: it is working
+    from the configuration it claimed with.
+
+    The response is the new rotation, so a caller immediately sees which
+    repository the change puts up next.
+    """
+    automation, _ = await _load_program(session, automation_id, user)
+
+    # Validate the cast before scheduling anything with it, as creation does.
+    await ensure_agent_profile_exists(body.builder_profile_id, request, user)
+    for reviewer_profile_id in body.reviewer_profile_ids:
+        await ensure_agent_profile_exists(reviewer_profile_id, request, user)
+
+    # Replace the whole mapping rather than mutating in place: SQLAlchemy does
+    # not track in-place changes to a JSON column.
+    metadata = dict(automation.preset_metadata or {})
+    metadata["improve"] = body.to_metadata()
+    automation.preset_metadata = metadata
+    # The builder is also the automation's profile; keep the two in step so the
+    # existing per-automation profile display does not go stale.
+    automation.agent_profile_id = body.builder_profile_id
+    automation.updated_at = utcnow()
+    await session.flush()
+    await mark_git_sync_dirty(session, automation)
+
+    repositories = await resolve_rotation(session, user.org_id, body)
+    previous = await latest_cycle(session, automation_id)
+    try:
+        upcoming: int | None = next_index(repositories, previous)
+    except NoRepositoriesError:
+        upcoming = None
+    return RotationResponse(
+        repositories=_rotation_entries(repositories),
+        next_index=upcoming,
+        last_cycle=CycleResponse.of(previous) if previous is not None else None,
+        config=body,
+    )
 
 
 @router.get("/{automation_id}/rotation")

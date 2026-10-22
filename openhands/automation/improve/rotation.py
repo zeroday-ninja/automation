@@ -12,13 +12,13 @@ took last time, instead of jumping wherever a bare index happens to land.
 
 import logging
 import uuid
-from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.git_sync.config_override import effective_settings_for
 from openhands.automation.improve.config import ImproveProgramConfig
+from openhands.automation.improve.url import strip_credentials
 from openhands.automation.models import (
     Automation,
     AutomationGitSyncRemote,
@@ -29,27 +29,6 @@ from openhands.automation.utils import utcnow
 
 
 logger = logging.getLogger(__name__)
-
-
-def strip_credentials(url: str) -> str:
-    """Drop any user:password embedded in a repository URL.
-
-    A cycle's repository URL is stored in history and shown in the dashboard,
-    and a run clones with a token the agent server holds rather than one
-    written into the URL. Either way the credential has no business being
-    copied out of the Git Sync configuration and into another table.
-    """
-    url = url.strip()
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        return url
-    if not parts.hostname or "@" not in parts.netloc:
-        return url
-    netloc = parts.hostname
-    if parts.port:
-        netloc = f"{netloc}:{parts.port}"
-    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 class RotationRepository:
