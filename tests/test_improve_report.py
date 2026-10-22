@@ -169,6 +169,42 @@ class TestAcpServerFromDetail:
         assert report.acp_server_from_detail(None) is None
 
 
+class TestCycleVerdict:
+    """A reviewer that never judged must not outrank one that did."""
+
+    def test_a_failed_reviewer_does_not_veto_an_acceptance(self, report):
+        # The live case: one runtime accepted after verifying, the other's
+        # server was down. Counting the dead one as INCONCLUSIVE let a broken
+        # runtime hold a permanent veto over every cycle.
+        reviews = [
+            {"verdict": "ACCEPTED", "failed": False},
+            {"verdict": "INCONCLUSIVE", "failed": True},
+        ]
+
+        assert report.cycle_verdict(reviews) == "ACCEPTED"
+
+    def test_a_reviewer_that_judged_and_was_unsure_still_counts(self, report):
+        reviews = [
+            {"verdict": "ACCEPTED", "failed": False},
+            {"verdict": "INCONCLUSIVE", "failed": False},
+        ]
+
+        assert report.cycle_verdict(reviews) == "INCONCLUSIVE"
+
+    def test_every_reviewer_failing_means_nothing_reviewed_it(self, report):
+        reviews = [{"verdict": "INCONCLUSIVE", "failed": True}]
+
+        assert report.cycle_verdict(reviews) == "SINGLE_RUNTIME"
+
+    def test_a_real_rejection_still_wins(self, report):
+        reviews = [
+            {"verdict": "ACCEPTED", "failed": False},
+            {"verdict": "REJECTED", "failed": False},
+        ]
+
+        assert report.cycle_verdict(reviews) == "REJECTED"
+
+
 class TestChooseReviewers:
     def test_picks_one_profile_per_other_runtime_when_none_configured(self, report):
         # Adding a second runtime to the server is enough to turn review on.

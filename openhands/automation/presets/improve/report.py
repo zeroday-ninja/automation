@@ -160,6 +160,29 @@ def worst_verdict(verdicts: list[str]) -> str:
     return max(verdicts, key=lambda verdict: _VERDICT_SEVERITY.get(verdict, 2))
 
 
+def cycle_verdict(reviews: list[dict]) -> str:
+    """The cycle's verdict, from the reviewers that actually judged it.
+
+    A reviewer that *failed* — an unreachable server, a stuck conversation —
+    did not judge anything, and must not outrank one that did. Counting it as
+    INCONCLUSIVE made one broken runtime outrank every real verdict, so a
+    change two working runtimes would have accepted could never read as
+    accepted. That is not caution; it is a broken runtime holding a veto.
+
+    A failed review is still recorded and still visible. It just does not vote.
+    When *every* reviewer failed, nothing independent judged the change, and
+    that is exactly what SINGLE_RUNTIME says.
+    """
+    judged = [
+        review["verdict"]
+        for review in reviews
+        if review.get("verdict") and not review.get("failed")
+    ]
+    if not judged:
+        return "SINGLE_RUNTIME"
+    return worst_verdict(judged)
+
+
 def acp_server_from_detail(payload) -> str | None:
     """The ACP server named by a ``GET /api/agent-profiles/{name}`` response.
 

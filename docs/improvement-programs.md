@@ -109,7 +109,7 @@ credential the agent server holds, so the URL never needs one.
 | `CHANGES_REQUESTED` | Worth keeping once the concerns are addressed. |
 | `REJECTED` | Should not land: wrong, off mission, or resting on a citation that does not hold. |
 | `INCONCLUSIVE` | A reviewer could not get far enough to judge. |
-| `SINGLE_RUNTIME` | Built, but no second runtime was available to review it. Not a pass. |
+| `SINGLE_RUNTIME` | Built, but nothing independent judged it — no other runtime was available, or every reviewer failed. Not a pass. |
 | `NO_CHANGE` | The cycle researched and deliberately changed nothing. A valid outcome. |
 
 A cycle whose builder reports itself **blocked** is recorded as a *failed*
@@ -129,6 +129,16 @@ absolute path. The clone happens on the service's filesystem; the agent may be
 in a Docker sandbox that mounts the same workspace somewhere else. Naming the
 absolute path sends it looking for a directory that does not exist, and a cycle
 reported exactly that: it had to guess where its report belonged.
+
+## A reviewer that failed does not vote
+
+The cycle's verdict is the worst of the verdicts from reviewers that actually
+judged it. A reviewer that *failed* is recorded and shown, but excluded from
+the aggregate: counting it as `INCONCLUSIVE` let one broken runtime outrank
+every real verdict, so a change a working runtime had verified and accepted
+could never read as accepted. That is not caution, it is a dead runtime
+holding a veto. When every reviewer failed, the verdict is `SINGLE_RUNTIME`,
+which is exactly what that means.
 
 ## When a reviewer does not finish
 
