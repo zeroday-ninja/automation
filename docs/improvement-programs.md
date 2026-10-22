@@ -101,6 +101,11 @@ credential the agent server holds, so the URL never needs one.
 | `SINGLE_RUNTIME` | Built, but no second runtime was available to review it. Not a pass. |
 | `NO_CHANGE` | The cycle researched and deliberately changed nothing. A valid outcome. |
 
+A cycle whose builder reports itself **blocked** is recorded as a *failed*
+cycle with the reason, not as `NO_CHANGE`. It may have done real work and still
+produced nothing reviewable, and the difference between "we decided against it"
+and "we could not finish" is exactly what these verdicts exist to keep apart.
+
 `NO_CHANGE` matters: "we looked into it and it is a bad idea, here are the
 sources" is a successful cycle, and keeping it distinct from a silent failure is
 how you tell a program that is working from one that is idling.

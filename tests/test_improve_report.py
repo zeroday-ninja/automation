@@ -149,6 +149,26 @@ PROFILES = {
 }
 
 
+class TestAcpServerFromDetail:
+    """Resolving which runtime a profile actually is."""
+
+    def test_reads_the_nested_profile_the_agent_server_returns(self, report):
+        payload = {"name": "claude-code", "profile": {"acp_server": "claude-code"}}
+
+        assert report.acp_server_from_detail(payload) == "claude-code"
+
+    def test_reads_a_top_level_field_too(self, report):
+        assert report.acp_server_from_detail({"acp_server": "codex"}) == "codex"
+
+    def test_returns_none_when_the_shape_says_nothing(self, report):
+        # The caller falls back to a generic label and warns; it must not
+        # invent a runtime, because "which runtime reviewed this" is the one
+        # claim the program makes.
+        assert report.acp_server_from_detail({"name": "x", "profile": {}}) is None
+        assert report.acp_server_from_detail({"acp_server": "  "}) is None
+        assert report.acp_server_from_detail(None) is None
+
+
 class TestChooseReviewers:
     def test_picks_one_profile_per_other_runtime_when_none_configured(self, report):
         # Adding a second runtime to the server is enough to turn review on.

@@ -121,6 +121,7 @@ from openhands.workspace import OpenHandsCloudWorkspace  # noqa: E402
 # report parsing lives in a module that can be imported without side effects.
 from report import (  # noqa: E402
     MAX_SUMMARY_CHARS,
+    acp_server_from_detail,
     choose_reviewers,
     clamp,
     normalize_sources,
@@ -263,11 +264,12 @@ def list_agent_profiles(workspace) -> dict:
             try:
                 detail = workspace.client.get(f"/api/agent-profiles/{name}")
                 detail.raise_for_status()
-                detail_payload = detail.json()
-                runtime = detail_payload.get("acp_server") or "acp"
+                runtime = acp_server_from_detail(detail.json()) or "acp"
             except Exception as exc:
                 print(f"  profile {name!r} detail fetch failed (non-fatal): {exc}")
                 runtime = "acp"
+            if runtime == "acp":
+                print(f"  WARNING: could not resolve {name!r}'s ACP server")
         profiles[str(profile_id)] = {
             "name": name,
             "kind": kind,
@@ -545,22 +547,21 @@ def execute_cycle(workspace) -> None:
         print(f"  status: {builder_status or 'unreported'}")
         print(f"  sources cited: {len(sources)}")
 
-        # A cycle that changed nothing has nothing to review. Recording it as
-        # NO_CHANGE keeps "researched and decided against it" distinct from
-        # "found nothing to say", which is the difference between a program
-        # that is working and one that is idling.
-        if builder_status in {"no_change", "blocked"} or not reported_branch:
-            report_cycle(
-                {
-                    "status": "COMPLETED",
-                    "verdict": "NO_CHANGE",
-                    "error": (
-                        clamp(report.get("summary"))
-                        if builder_status == "blocked"
-                        else None
-                    ),
-                }
-            )
+        # A blocked cycle is a failed one. It may have done real work — the
+        # first live run implemented its change, tested it and then could not
+        # push — but it produced nothing anyone can review, and recording that
+        # as NO_CHANGE would read as "we looked and decided against it". The
+        # whole point of these verdicts is to keep those two apart.
+        if builder_status == "blocked":
+            report_cycle({"status": "FAILED", "error": builder_summary})
+            report_phase(f"{repo_label}: blocked")
+            print("  blocked; recorded as a failed cycle")
+            return
+
+        # Nothing to review, and that is a real outcome: researching an idea
+        # and deciding against it is a successful cycle.
+        if builder_status == "no_change" or not reported_branch:
+            report_cycle({"status": "COMPLETED", "verdict": "NO_CHANGE"})
             report_phase(f"{repo_label}: no change this cycle")
             return
 
