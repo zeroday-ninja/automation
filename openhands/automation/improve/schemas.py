@@ -1,7 +1,6 @@
 """Request and response schemas for the improvement-program API."""
 
 import uuid
-from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -12,6 +11,7 @@ from openhands.automation.models import (
     ImproveCycleStatus,
     ImproveVerdict,
 )
+from openhands.automation.utils.time import UtcDatetime
 
 
 MAX_SOURCES = 40
@@ -162,9 +162,11 @@ class CycleResponse(BaseModel):
     reviews: list[dict[str, Any]]
     soul_suggestions: list[dict[str, Any]]
     error: str | None
-    created_at: datetime
-    updated_at: datetime
-    completed_at: datetime | None
+    # UtcDatetime, not datetime: SQLite returns naive values and a timestamp
+    # serialized without an offset is read by JavaScript as *local* time.
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
+    completed_at: UtcDatetime | None
 
     @classmethod
     def of(cls, cycle: AutomationImproveCycle) -> "CycleResponse":

@@ -382,6 +382,122 @@ class TestRotation:
         assert await claim_label(async_client, program["id"]) == "beta"
 
 
+class TestEditingAProgram:
+    """PUT /v1/improve/{automation_id}/config."""
+
+    async def test_changes_what_the_next_cycle_does(self, async_client):
+        # Arrange: a program over three repositories, one cycle taken.
+        for label in ("alpha", "beta", "gamma"):
+            await add_remote(async_client, f"https://github.com/acme/{label}", label)
+        program = await create_program(async_client)
+        assert await claim_label(async_client, program["id"]) == "alpha"
+
+        # Act: narrow the rotation and add a reviewer.
+        response = await async_client.put(
+            f"/api/automation/v1/improve/{program['id']}/config",
+            json=improve_config(
+                reviewer_profile_ids=[REVIEWER],
+                repository_labels=["alpha", "gamma"],
+                focus="Prefer dependency hygiene.",
+            ),
+        )
+
+        # Assert: the response shows the new rotation, and the next cycle
+        # follows it. alpha was taken last, so gamma is up next.
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert [repo["label"] for repo in body["repositories"]] == ["alpha", "gamma"]
+        assert body["config"]["focus"] == "Prefer dependency hygiene."
+        assert body["repositories"][body["next_index"]]["label"] == "gamma"
+        assert await claim_label(async_client, program["id"]) == "gamma"
+
+    async def test_keeps_the_automations_profile_in_step_with_the_builder(
+        self, async_client, async_session
+    ):
+        await add_remote(async_client, "https://github.com/acme/alpha", "alpha")
+        program = await create_program(async_client)
+
+        response = await async_client.put(
+            f"/api/automation/v1/improve/{program['id']}/config",
+            json={"builder_profile_id": REVIEWER},
+        )
+        assert response.status_code == 200, response.text
+
+        await async_session.commit()
+        automation = (
+            (
+                await async_session.execute(
+                    select(Automation).where(Automation.id == uuid.UUID(program["id"]))
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert automation is not None
+        assert str(automation.agent_profile_id) == REVIEWER
+
+    async def test_rejects_a_configuration_it_would_not_have_accepted_at_creation(
+        self, async_client
+    ):
+        await add_remote(async_client, "https://github.com/acme/alpha", "alpha")
+        program = await create_program(async_client)
+
+        response = await async_client.put(
+            f"/api/automation/v1/improve/{program['id']}/config",
+            json=improve_config(reviewer_profile_ids=[BUILDER]),
+        )
+        assert response.status_code == 422
+
+    async def test_another_org_cannot_edit_a_program(self, async_client, as_other_org):
+        await add_remote(async_client, "https://github.com/acme/alpha", "alpha")
+        program = await create_program(async_client)
+
+        as_other_org()
+        response = await async_client.put(
+            f"/api/automation/v1/improve/{program['id']}/config",
+            json=improve_config(),
+        )
+        assert response.status_code == 404
+
+
+class TestRepositoryUrls:
+    """A credential never belongs in a stored repository URL."""
+
+    async def test_drops_a_credential_from_an_explicit_repository_url(
+        self, async_client, async_session
+    ):
+        # Arrange / Act: a repository URL submitted with a token in it.
+        created = await create_program(
+            async_client,
+            repository_source="explicit",
+            repositories=[
+                {
+                    "label": "one",
+                    "url": "https://someone:s3cret@github.com/acme/one",
+                }
+            ],
+        )
+
+        # Assert: it is neither stored nor echoed. Storing it would export the
+        # token to the Git Sync repository and show it in the dashboard.
+        automation = (
+            (
+                await async_session.execute(
+                    select(Automation).where(Automation.id == uuid.UUID(created["id"]))
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert automation is not None
+        stored = automation.preset_metadata["improve"]["repositories"][0]["url"]
+        assert stored == "https://github.com/acme/one"
+
+        claimed = await claim(async_client, created["id"])
+        assert claimed.status_code == 201, claimed.text
+        assert "s3cret" not in claimed.text
+
+
 class TestCycleReporting:
     """PATCH /v1/improve/cycles/{id} and the history the dashboard reads."""
 
@@ -523,6 +639,11 @@ class TestCycleReporting:
             "beta",
             "alpha",
         ]
+        # Timestamps must carry an offset: a naive one is read by JavaScript's
+        # Date as local time, so the dashboard would date every cycle wrongly.
+        assert body["cycles"][0]["created_at"].endswith("Z") or body["cycles"][0][
+            "created_at"
+        ].endswith("+00:00")
 
     async def test_another_org_cannot_read_history(self, async_client, as_other_org):
         await add_remote(async_client, "https://github.com/acme/alpha", "alpha")
