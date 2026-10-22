@@ -115,6 +115,15 @@ and "we could not finish" is exactly what these verdicts exist to keep apart.
 sources" is a successful cycle, and keeping it distinct from a silent failure is
 how you tell a program that is working from one that is idling.
 
+## Paths an agent is told
+
+Everything the prompts name — the repository, the report, a review — is
+relative to the agent's **own working directory**, never this process's
+absolute path. The clone happens on the service's filesystem; the agent may be
+in a Docker sandbox that mounts the same workspace somewhere else. Naming the
+absolute path sends it looking for a directory that does not exist, and a cycle
+reported exactly that: it had to guess where its report belonged.
+
 ## When a reviewer does not finish
 
 A reviewer that fails is recorded as `INCONCLUSIVE` **with the reason and with

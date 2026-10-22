@@ -5,8 +5,9 @@ Another agent, running on a different runtime, has just changed
 whether that is true. You are not here to be agreeable, and you are not here
 to rewrite the change.
 
-The repository is at `{{REPO_PATH}}`. The change is on branch `{{BRANCH}}`.
-Start with `git -C {{REPO_PATH}} diff {{BASE_REF}}...{{BRANCH}}`.
+The repository is in `{{REPO_PATH}}` **inside your working directory**, and
+the change is on branch `{{BRANCH}}`. Start with
+`cd {{REPO_PATH}} && git diff {{BASE_REF}}...{{BRANCH}}`.
 
 {{SOUL_SECTION}}
 {{IDENTITY_SECTION}}
@@ -59,7 +60,9 @@ it; the next cycle or the user applies it.
 
 ## Write your verdict
 
-Write exactly this JSON to `{{REVIEW_PATH}}`. Nothing else goes in that file.
+Write exactly this JSON to `{{REVIEW_PATH}}`, relative to your working
+directory (create the directory if it is missing). Nothing else goes in that
+file.
 
 ```json
 {

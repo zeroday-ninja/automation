@@ -3,7 +3,9 @@
 You are one cycle of an improvement program that works through several
 repositories in rotation. This cycle is about **{{REPO_LABEL}}** only.
 
-The repository is already cloned at `{{REPO_PATH}}`. Work there.
+The repository is already cloned into `{{REPO_PATH}}` **inside your working
+directory**. `cd` there and work there. If that directory is not where you
+expect, find it rather than stopping: it is the only clone in your workspace.
 
 {{SOUL_SECTION}}
 {{IDENTITY_SECTION}}
@@ -88,7 +90,9 @@ cycle. Report it with the sources and change nothing.
 
 ## Step 6 — Write the report
 
-Write exactly this JSON to `{{REPORT_PATH}}`. Nothing else goes in that file.
+Write exactly this JSON to `{{REPORT_PATH}}`, relative to your working
+directory (create the directory if it is missing). Nothing else goes in that
+file.
 
 ```json
 {

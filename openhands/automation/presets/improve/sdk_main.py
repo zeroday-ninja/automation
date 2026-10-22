@@ -454,7 +454,13 @@ def execute_cycle(workspace) -> None:
             )
         mapping = next(iter(clone_result.repo_mappings.values()))
         repo_path = mapping.local_path
-        print(f"  cloned to {repo_path}")
+        # The directory name, not the path. The clone happens here, but the
+        # agent runs somewhere else — a Docker sandbox mounts this workspace
+        # at its own path, so naming the host path sends it looking for a
+        # directory that does not exist and it has to guess. A name relative
+        # to its own working directory is true in both places.
+        repo_dir = os.path.basename(repo_path.rstrip("/")) or repo_path
+        print(f"  cloned to {repo_path} (agents are told: ./{repo_dir})")
 
         # --- Assemble the context the cycle reasons from --------------------
         print("\n=== CONTEXT ===")
@@ -485,6 +491,10 @@ def execute_cycle(workspace) -> None:
         cycle_dir = os.path.join(workspace.working_dir, CYCLE_DIR_NAME)
         os.makedirs(cycle_dir, exist_ok=True)
         report_path = os.path.join(cycle_dir, "report.json")
+        # Told to the agent relative to its working directory, for the same
+        # reason the repository is: the absolute path is this process's, and
+        # a sandboxed agent cannot see it. The script still reads the real one.
+        report_path_told = f"{CYCLE_DIR_NAME}/report.json"
 
         branch_prefix = config.get("branch_prefix") or "improve/"
         branch = f"{branch_prefix}{time.strftime('%Y%m%d-%H%M%S')}"
@@ -523,14 +533,14 @@ def execute_cycle(workspace) -> None:
             load_template("builder_prompt.md"),
             {
                 "REPO_LABEL": repo_label,
-                "REPO_PATH": repo_path,
+                "REPO_PATH": repo_dir,
                 "SOUL_SECTION": soul_section,
                 "IDENTITY_SECTION": identity_section,
                 "FOCUS_SECTION": focus_section,
                 "MAX_CHANGED_FILES": str(config.get("max_changed_files") or 20),
                 "BRANCH": branch,
                 "BRANCH_PREFIX": branch_prefix,
-                "REPORT_PATH": report_path,
+                "REPORT_PATH": report_path_told,
                 "PR_INSTRUCTION": (
                     "- Open a pull request against the default branch. Its body "
                     "must list the sources you relied on and the checks you ran."
@@ -621,6 +631,7 @@ def execute_cycle(workspace) -> None:
         reviews = []
         for position, reviewer in enumerate(reviewers, start=1):
             review_path = os.path.join(cycle_dir, f"review-{position}.json")
+            review_path_told = f"{CYCLE_DIR_NAME}/review-{position}.json"
             label = reviewer["name"] or reviewer["id"]
             report_phase(f"{label} is reviewing the change to {repo_label}")
             print(f"\n  reviewer {position}: {label} ({reviewer['runtime']})")
@@ -628,7 +639,7 @@ def execute_cycle(workspace) -> None:
                 reviewer_template,
                 {
                     "REPO_LABEL": repo_label,
-                    "REPO_PATH": repo_path,
+                    "REPO_PATH": repo_dir,
                     "BRANCH": reported_branch,
                     "BASE_REF": base_ref,
                     "SOUL_SECTION": soul_section,
@@ -636,7 +647,7 @@ def execute_cycle(workspace) -> None:
                     "BUILDER_SUMMARY": builder_summary,
                     "BUILDER_SOURCES": sources_rendered,
                     "BUILDER_RISKS": risks_rendered,
-                    "REVIEW_PATH": review_path,
+                    "REVIEW_PATH": review_path_told,
                 },
             )
             review_conversation_id = None
