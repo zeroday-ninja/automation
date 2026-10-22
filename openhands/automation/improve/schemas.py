@@ -66,6 +66,15 @@ class CycleReview(BaseModel):
     verdict: ImproveVerdict | None = None
     summary: str | None = Field(default=None, max_length=MAX_SUMMARY)
     concerns: list[str] = Field(default_factory=list, max_length=40)
+    updates_checked: str | None = Field(
+        default=None,
+        max_length=MAX_SUMMARY,
+        description=(
+            "What this reviewer checked for being out of date, and what it "
+            "found — including an explicit 'nothing newer', which is a "
+            "different statement from having said nothing."
+        ),
+    )
     stale_sources: list[str] = Field(
         default_factory=list,
         max_length=MAX_SOURCES,

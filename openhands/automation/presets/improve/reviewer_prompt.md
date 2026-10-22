@@ -38,6 +38,12 @@ the change is on branch `{{BRANCH}}`. Start with
    newer recommended API, a security advisory against the chosen version. The
    builder optimized for finishing; you are the one who checks the world moved.
 
+   **Answer this one every time, in `updates_checked`, even when the answer is
+   "nothing newer".** A silent field is indistinguishable from not having
+   looked, and "we checked and it is current as of release X" is a different
+   and more useful statement than saying nothing. Name what you compared
+   against.
+
 3. **Is it correct?** Read the diff for real defects: wrong edge cases, broken
    error handling, races, resource leaks, changed behavior the tests do not
    cover. Run the project's own checks yourself rather than trusting the
@@ -71,6 +77,7 @@ file.
   "concerns": ["One concern per entry, most serious first. Say what breaks and when."],
   "stale_sources": ["URLs that are outdated, superseded, or do not support the claim attached to them"],
   "newer_available": ["Something newer or better than what was chosen, with the URL"],
+  "updates_checked": "What you checked for being out of date and what you found. Required, every time. Name the versions, releases or advisories you looked at. If nothing supersedes the approach, say so explicitly and say what you compared against — 'current as of <release>' — rather than leaving this empty.",
   "checks": [{"command": "what you ran", "result": "pass | fail | skipped", "detail": "why, if not pass"}],
   "verified_sources": ["URLs you opened and confirmed do support their claim"],
   "soul_suggestions": [{"text": "a preference about how this user wants to be worked for", "why": "what in this review suggested it"}]
