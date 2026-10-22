@@ -79,6 +79,17 @@ run take another.
 The builder may not also be a reviewer: the request is rejected, because a
 runtime reviewing its own work is not independent review.
 
+`PUT /v1/improve/{automation_id}/config` replaces the whole configuration. It
+is a replacement rather than a patch because the fields constrain each other —
+a repository source and its list, a builder and its reviewers — so a partial
+update would have to re-validate the merged result anyway. It applies from the
+next cycle; one already running keeps the configuration it claimed with.
+
+An explicit repository URL has any embedded username or password dropped. It
+would otherwise be stored in the automation's metadata, exported to the Git
+Sync repository with it, and shown in the dashboard, and a cycle clones with a
+credential the agent server holds, so the URL never needs one.
+
 ## Verdicts
 
 | Verdict | Meaning |
