@@ -303,6 +303,79 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 }
 ```
 
+### Improve Preset (improvement programs)
+
+`POST /v1/preset/improve` creates an *improvement program*: a cron automation
+whose runs work through several repositories in rotation. One run is one
+**cycle**. See `docs/improvement-programs.md` for the full design.
+
+Per cycle: take the next repository, have the configured **builder** agent
+profile research and implement one improvement there with cited sources, then
+have every *other* available agent runtime review that change adversarially.
+Nothing merges itself; a cycle ends in a branch, optionally a pull request, and
+a verdict.
+
+#### Why one run and several conversations
+
+A conversation is created from an `agent_profile_id`, so a single run can build
+under one runtime and review under another and compare them. Chaining several
+runs would need rotation state to survive between them for no gain, and the
+service has no run-chaining concept.
+
+#### The rotation has no stored cursor
+
+The next repository is the one after the newest `automation_improve_cycle`
+row's repository, matched by label and falling back to position
+(`improve/rotation.py:next_index`). There is deliberately no counter to drift
+out of step with the visible history, `GET .../rotation` and the claim call the
+same function so the dashboard cannot promise a different repository than the
+run takes, and a failed cycle still advances the rotation rather than retrying
+one repository forever.
+
+By default the rotation is the org's Git Sync remotes ordered **by creation,
+not default-first**: which remote is the default changes as the user works, and
+the rotation must not reshuffle underneath a running program.
+
+#### Configuration lives on the automation, not in the tarball
+
+`preset_metadata["improve"]` holds `ImproveProgramConfig` and the claim
+response returns it, so editing a program takes effect on its next run without
+regenerating its code. The tarball carries only `main.py`, `setup.sh` and the
+two prompt templates.
+
+#### Files
+
+- `openhands/automation/improve/` - `config.py`, `rotation.py`, `router.py`, `schemas.py`
+- `openhands/automation/presets/improve/` - `sdk_main.py`, `builder_prompt.md`, `reviewer_prompt.md`, `setup.sh`
+- `openhands/automation/models.py` - `AutomationImproveCycle`, `ImproveCycleStatus`, `ImproveVerdict`
+- `migrations/versions/035_improve_cycles.py`
+- `tests/test_improve_program.py`
+
+#### Routes
+
+| Route | Caller |
+|---|---|
+| `POST /v1/preset/improve` | Canvas, to create a program |
+| `POST /v1/improve/{automation_id}/claim` | a run, once, before any agent work |
+| `PATCH /v1/improve/cycles/{cycle_id}` | a run, after each stage |
+| `GET /v1/improve/{automation_id}/rotation` | the dashboard |
+| `GET /v1/improve/{automation_id}/cycles` | the dashboard |
+
+The two run-facing routes authenticate with the same credential as the run
+callbacks (`view_automations` plus an ownership check on the parent
+automation), matching `complete_run` and `report_run_phase`.
+
+#### Reviewing changes here
+
+- Keep the prompt templates in `presets/improve/*.md`. Prompt text that an
+  agent is actually given must stay reviewable next to the code that renders
+  it, never built inline in the router.
+- A reviewer runtime must differ from the builder's. `SINGLE_RUNTIME` is a
+  distinct verdict, not a pass: it records that nothing independent checked the
+  change.
+- A run may propose `soul_suggestions` but must never edit the user's SOUL.md.
+  There is no API path for it to, and that is on purpose.
+
 ### Notes
 
 - The `presets/` directory is excluded from ruff and pyright linting since it contains SDK code that runs in the sandbox, not application code
