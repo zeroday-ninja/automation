@@ -68,6 +68,7 @@ _STATIC_FEATURES = (
     # Can run a client-supplied tarball, so an entry may ship a script bundle.
     "customTarball",
     "mcpTools",
+    "presetImprove",
     "presetPlugin",
     "presetPrompt",
     "repoClone",

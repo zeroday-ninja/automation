@@ -976,3 +976,150 @@ class AutomationGitSyncRemoval(Base):
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
+
+
+class ImproveCycleStatus(StrEnum):
+    """Lifecycle of one improvement cycle.
+
+    A cycle is claimed before any agent starts, so an interrupted run leaves a
+    row behind that records which repository it had taken. The rotation reads
+    the newest row's ``repo_index`` whatever its status, which is what makes a
+    crashed cycle advance the rotation instead of pinning it to one repository.
+    """
+
+    CLAIMED = "CLAIMED"
+    BUILDING = "BUILDING"
+    REVIEWING = "REVIEWING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class ImproveVerdict(StrEnum):
+    """What the adversarial review concluded about a cycle's change.
+
+    ``SINGLE_RUNTIME`` is not a quality judgement: it records that no second
+    runtime was available to review, so the change carries only its builder's
+    own word. Keeping it distinct from ``ACCEPTED`` is the point — the whole
+    reason the program runs two runtimes is that one runtime reviewing itself
+    is not evidence.
+    """
+
+    ACCEPTED = "ACCEPTED"
+    CHANGES_REQUESTED = "CHANGES_REQUESTED"
+    REJECTED = "REJECTED"
+    INCONCLUSIVE = "INCONCLUSIVE"
+    SINGLE_RUNTIME = "SINGLE_RUNTIME"
+    NO_CHANGE = "NO_CHANGE"
+
+
+class AutomationImproveCycle(Base):
+    """One pass of an improvement program over one repository.
+
+    An improvement program is a cron automation that rotates through the
+    organization's git-sync remotes: each run takes the repository after the
+    one the previous run took, researches an improvement for it, implements it,
+    and then has a *different* agent runtime review the result adversarially.
+
+    This table is both the rotation cursor and the history the dashboard reads.
+    The cursor is derived rather than stored: the next repository is the one
+    after ``repo_index`` of this automation's newest row. There is no separate
+    counter to drift out of step with the history, and deleting history
+    legitimately rewinds the rotation.
+    """
+
+    __tablename__ = "automation_improve_cycle"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+
+    automation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Denormalized so a cycle can be authorized and listed without joining
+    # the automation, the same reason git-sync state carries it.
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+
+    # The run that claimed this cycle. Cleared rather than cascaded: run
+    # history is pruned on a schedule and the cycle outlives it.
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("automation_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    # Position in the rotation at claim time, and the repository it resolved
+    # to. The identity is kept as plain columns rather than a remote FK so the
+    # history stays readable after a remote is deleted or relabelled.
+    repo_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    repo_label: Mapped[str] = mapped_column(String(255), nullable=False)
+    repo_url: Mapped[str] = mapped_column(Text, nullable=False)
+    repo_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    remote_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("automation_git_sync_remote.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    status: Mapped[ImproveCycleStatus] = mapped_column(
+        Enum(ImproveCycleStatus, native_enum=False, length=16),
+        default=ImproveCycleStatus.CLAIMED,
+        nullable=False,
+        index=True,
+    )
+    verdict: Mapped[ImproveVerdict | None] = mapped_column(
+        Enum(ImproveVerdict, native_enum=False, length=20),
+        nullable=True,
+    )
+
+    # Builder stage: which profile did the work and where to read it.
+    builder_profile_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    builder_runtime: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    builder_conversation_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    pr_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Cited sources the builder based the change on: a list of
+    # ``{url, title, note}``. Kept whole rather than normalized into rows
+    # because nothing queries across them; they are read back with the cycle.
+    sources: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+
+    # One entry per reviewing runtime:
+    # ``{profile_id, runtime, conversation_id, verdict, concerns, summary}``.
+    reviews: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        # The rotation asks one question only: the newest cycle of this
+        # automation. Ordering by created_at is ambiguous when two rows share a
+        # timestamp, so the lookup orders by (created_at, id) and this index
+        # matches it.
+        Index(
+            "ix_automation_improve_cycle_automation_created",
+            "automation_id",
+            "created_at",
+            "id",
+        ),
+    )

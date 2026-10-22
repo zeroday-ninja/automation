@@ -1,0 +1,799 @@
+"""Improvement-program run script — executes inside an OpenHands sandbox.
+
+One run is one *cycle*: it claims the next repository in the program's
+rotation, has the builder profile research and implement a single improvement
+there, and then has every other available runtime review that work
+adversarially. Nothing is merged; a cycle produces a branch, a pull request
+and a verdict for the user to act on.
+
+Why a run creates several conversations instead of the service chaining
+several runs: a conversation is created from an ``agent_profile_id``, so one
+script can run the builder under Claude Code and the review under Codex and
+compare them. Chaining runs would need the rotation state to survive between
+them for no gain.
+
+Mode detection, env contract and phase reporting match
+``presets/prompt/sdk_main.py``; see that file for the full env var list. The
+pieces specific to this preset are:
+
+  AUTOMATION_API_URL            - automation service base (claim/report cycle)
+  AUTOMATION_CALLBACK_API_KEY   - credential for those calls (local mode)
+  OPENHANDS_API_KEY             - the same, in cloud mode
+  AUTOMATION_ID                 - which program is running
+  AUTOMATION_RUN_ID             - the run that owns this cycle
+  AUTOMATION_AGENT_PROFILE_ID   - ignored: the program names its own profiles
+"""
+
+import json
+import os
+import sys
+import time
+import uuid
+
+# Detect execution mode based on AGENT_SERVER_URL presence
+agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
+IS_LOCAL_MODE = bool(agent_server_url)
+
+api_key = os.environ.get("OPENHANDS_API_KEY", "")
+api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "").rstrip("/")
+sandbox_id = os.environ.get("SANDBOX_ID", "")
+session_key = os.environ.get("OH_SESSION_API_KEYS_0") or os.environ.get(
+    "SESSION_API_KEY", ""
+)
+automation_user_id = os.environ.get("AUTOMATION_USER_ID") or None
+automation_id = os.environ.get("AUTOMATION_ID", "")
+automation_run_id = os.environ.get("AUTOMATION_RUN_ID") or None
+automation_api_url = os.environ.get("AUTOMATION_API_URL", "").rstrip("/")
+
+print("=== EXECUTION MODE ===")
+print(f"  mode: {'LOCAL' if IS_LOCAL_MODE else 'CLOUD'}")
+
+print("\n=== ENV VARS ===")
+if IS_LOCAL_MODE:
+    print(f"  AGENT_SERVER_URL: {'OK' if agent_server_url else 'MISSING'}")
+    print(f"  OH_SESSION_API_KEYS_0: {'OK' if session_key else 'NONE (may fail auth)'}")
+    if not agent_server_url:
+        print("FAIL: AGENT_SERVER_URL not set for local mode", file=sys.stderr)
+        sys.exit(1)
+else:
+    for name, val in [
+        ("OPENHANDS_API_KEY", api_key),
+        ("OPENHANDS_CLOUD_API_URL", api_url),
+        ("SANDBOX_ID", sandbox_id),
+        ("OH_SESSION_API_KEYS_0", session_key),
+    ]:
+        print(f"  {name}: {'OK' if val else 'MISSING'}")
+        if not val:
+            print(f"FAIL: {name} not set", file=sys.stderr)
+            sys.exit(1)
+
+# The cycle API is what makes this preset a *program* rather than one prompt:
+# without it there is no rotation and no history, so this is fatal.
+_CYCLE_TOKEN = (
+    os.environ.get("AUTOMATION_CALLBACK_API_KEY")
+    or os.environ.get("OPENHANDS_API_KEY")
+    or ""
+)
+print(f"  AUTOMATION_API_URL: {automation_api_url or 'MISSING'}")
+print(f"  AUTOMATION_ID: {automation_id or 'MISSING'}")
+print(f"  cycle credential: {'OK' if _CYCLE_TOKEN else 'MISSING'}")
+for label, value in (
+    ("AUTOMATION_API_URL", automation_api_url),
+    ("AUTOMATION_ID", automation_id),
+    ("cycle credential", _CYCLE_TOKEN),
+):
+    if not value:
+        print(f"FAIL: {label} is required by the improve preset", file=sys.stderr)
+        sys.exit(1)
+
+# --- Live phase reporting (best-effort, never fatal) -------------------------
+# Keep this block in sync with presets/prompt/sdk_main.py.
+AUTOMATION_PHASE_URL = os.environ.get("AUTOMATION_PHASE_URL", "")
+
+
+def report_phase(message: str) -> None:
+    """POST a short progress phase to the automation service. Never raises."""
+    if not AUTOMATION_PHASE_URL or not _CYCLE_TOKEN or not message:
+        return
+    try:
+        import httpx
+
+        httpx.post(
+            AUTOMATION_PHASE_URL,
+            json={"phase": message[:200]},
+            headers={"Authorization": f"Bearer {_CYCLE_TOKEN}"},
+            timeout=5.0,
+        )
+    except Exception:
+        pass  # phases are cosmetic; the run must never fail because of them
+
+
+# SDK imports (before the workspace context so import errors are caught)
+import httpx  # noqa: E402
+
+from openhands.sdk import RemoteConversation  # noqa: E402
+from openhands.sdk.automation import automation_conversation_kwargs  # noqa: E402
+from openhands.sdk.conversation.request import StartConversationRequest  # noqa: E402
+from openhands.sdk.workspace.local import LocalWorkspace  # noqa: E402
+from openhands.sdk.workspace.remote.base import RemoteWorkspace  # noqa: E402
+from openhands.workspace import OpenHandsCloudWorkspace  # noqa: E402
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CYCLE_DIR_NAME = ".improve-cycle"
+MAX_DOC_CHARS = 20000
+MAX_SUMMARY_CHARS = 20000
+
+# How long to wait for the cycle API. Short: these calls sit between stages of
+# a run that may legitimately take hours, and a hung report should not consume
+# the budget meant for the work.
+CYCLE_HTTP_TIMEOUT = 30.0
+
+
+def cycle_request(method: str, path: str, payload: dict | None = None) -> dict:
+    """Call the automation service's improvement-cycle API."""
+    response = httpx.request(
+        method,
+        f"{automation_api_url}{path}",
+        json=payload,
+        headers={"Authorization": f"Bearer {_CYCLE_TOKEN}"},
+        timeout=CYCLE_HTTP_TIMEOUT,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def read_doc(path: str) -> str | None:
+    """Read a context document, or None when it is absent or unreadable."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read(MAX_DOC_CHARS + 1)
+    except OSError:
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    if len(text) > MAX_DOC_CHARS:
+        text = text[:MAX_DOC_CHARS] + "\n\n[truncated]"
+    return text
+
+
+def render(template: str, values: dict) -> str:
+    """Substitute ``{{KEY}}`` placeholders.
+
+    Deliberately not ``str.format``: these templates are Markdown full of
+    JSON braces, and the agent must receive them exactly as written.
+    """
+    for key, value in values.items():
+        template = template.replace("{{" + key + "}}", value)
+    return template
+
+
+def load_template(name: str) -> str:
+    with open(os.path.join(SCRIPT_DIR, name), encoding="utf-8") as handle:
+        return handle.read()
+
+
+def quoted_section(title: str, body: str | None, absent_note: str) -> str:
+    """A context document as a titled section, or a note that it is missing.
+
+    Saying a document is absent is worth the tokens: it tells the agent the
+    silence is a fact about the repository, not something it failed to find.
+    """
+    if not body:
+        return f"## {title}\n\n{absent_note}\n"
+    return f"## {title}\n\n{body}\n"
+
+
+def fetch_soul(workspace) -> str | None:
+    """The user's SOUL.md from the agent server, if that server serves it.
+
+    Older agent servers have no such route; a program should still run, just
+    without the user's standing preferences, so a 404 is not an error here.
+    """
+    try:
+        response = workspace.client.get("/api/soul")
+        if response.status_code == 404:
+            print("  agent server has no /api/soul route (older version)")
+            return None
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        print(f"  SOUL.md fetch failed (non-fatal): {exc}")
+        return None
+    if not isinstance(payload, dict):
+        return None
+    # Only a soul the user actually wrote. The server returns its built-in
+    # default otherwise, which says nothing about this user's preferences.
+    if not payload.get("exists"):
+        print("  no user SOUL.md on the agent server")
+        return None
+    content = payload.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+    text = content.strip()
+    if len(text) > MAX_DOC_CHARS:
+        text = text[:MAX_DOC_CHARS] + "\n\n[truncated]"
+    return text
+
+
+def list_agent_profiles(workspace) -> dict:
+    """Map profile id -> {name, kind, runtime}.
+
+    ``runtime`` is what the program compares to keep review independent: the
+    ACP server for an ACP profile (``claude-code``, ``codex``, ...), or the
+    LLM profile for an OpenHands one. The list endpoint does not carry the ACP
+    server, so each profile is fetched by name to find it.
+    """
+    profiles: dict = {}
+    try:
+        response = workspace.client.get("/api/agent-profiles")
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        print(f"  listing agent profiles failed (non-fatal): {exc}")
+        return profiles
+
+    summaries = payload.get("profiles") if isinstance(payload, dict) else None
+    if not isinstance(summaries, list):
+        return profiles
+
+    for summary in summaries:
+        if not isinstance(summary, dict):
+            continue
+        profile_id = summary.get("id")
+        name = summary.get("name")
+        if not profile_id or not isinstance(name, str):
+            continue
+        kind = summary.get("agent_kind") or "openhands"
+        runtime = summary.get("llm_profile_ref") or kind
+        if kind == "acp":
+            try:
+                detail = workspace.client.get(f"/api/agent-profiles/{name}")
+                detail.raise_for_status()
+                detail_payload = detail.json()
+                runtime = detail_payload.get("acp_server") or "acp"
+            except Exception as exc:
+                print(f"  profile {name!r} detail fetch failed (non-fatal): {exc}")
+                runtime = "acp"
+        profiles[str(profile_id)] = {
+            "name": name,
+            "kind": kind,
+            "runtime": str(runtime),
+        }
+    return profiles
+
+
+def choose_reviewers(config: dict, profiles: dict, builder_id: str) -> list[dict]:
+    """Which profiles review this cycle, and under which runtime.
+
+    Configured reviewers win. With none configured the program picks one
+    profile per *other* runtime available on the server, so adding a second
+    runtime is all it takes to turn independent review on — which is the
+    behavior the program is for.
+    """
+    builder = profiles.get(builder_id) or {}
+    builder_runtime = builder.get("runtime")
+    configured = [str(pid) for pid in config.get("reviewer_profile_ids") or []]
+
+    if configured:
+        chosen = []
+        for profile_id in configured:
+            profile = profiles.get(profile_id)
+            if profile is None:
+                # Keep it: the server may simply not have listed it. The
+                # conversation will fail loudly if the id is really gone.
+                chosen.append({"id": profile_id, "name": None, "runtime": None})
+                continue
+            chosen.append(
+                {
+                    "id": profile_id,
+                    "name": profile.get("name"),
+                    "runtime": profile.get("runtime"),
+                }
+            )
+        return chosen
+
+    chosen = []
+    seen_runtimes = {builder_runtime} if builder_runtime else set()
+    for profile_id, profile in sorted(
+        profiles.items(), key=lambda item: item[1].get("name") or ""
+    ):
+        runtime = profile.get("runtime")
+        if profile_id == builder_id or not runtime or runtime in seen_runtimes:
+            continue
+        seen_runtimes.add(runtime)
+        chosen.append(
+            {"id": profile_id, "name": profile.get("name"), "runtime": runtime}
+        )
+    return chosen
+
+
+def read_json_report(path: str) -> dict | None:
+    """Read an agent-written JSON report, tolerating a fenced code block.
+
+    Agents are told to write bare JSON and usually do, but a stray ```json
+    fence is a formatting slip, not a failed cycle, so it is unwrapped rather
+    than discarded.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            raw = handle.read()
+    except OSError:
+        return None
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[: -len("```")]
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        parsed = json.loads(text[start : end + 1])
+    except json.JSONDecodeError as exc:
+        print(f"  report at {path} is not valid JSON: {exc}")
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def clamp(value, limit: int = MAX_SUMMARY_CHARS) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    return value[:limit]
+
+
+def string_list(value, limit: int = 40, item_limit: int = 2000) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out = []
+    for item in value[:limit]:
+        if isinstance(item, str) and item.strip():
+            out.append(item.strip()[:item_limit])
+        elif isinstance(item, dict):
+            # Reviewers sometimes answer "newer_available" as objects; keep
+            # them readable rather than dropping the finding.
+            rendered = " ".join(
+                str(item[key]) for key in ("url", "title", "note") if item.get(key)
+            ).strip()
+            if rendered:
+                out.append(rendered[:item_limit])
+    return out
+
+
+def normalize_sources(value) -> list[dict]:
+    """Coerce a builder's ``sources`` into the cycle API's shape."""
+    if not isinstance(value, list):
+        return []
+    sources = []
+    for item in value[:40]:
+        if isinstance(item, str) and item.strip().startswith(("http://", "https://")):
+            sources.append({"url": item.strip()[:2000]})
+            continue
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url")
+        if not isinstance(url, str) or not url.strip().startswith(
+            ("http://", "https://")
+        ):
+            continue
+        source = {"url": url.strip()[:2000]}
+        for key, limit in (("title", 500), ("note", 2000)):
+            text = clamp(item.get(key), limit)
+            if text:
+                source[key] = text
+        sources.append(source)
+    return sources
+
+
+_VERDICTS = {
+    "accepted": "ACCEPTED",
+    "changes_requested": "CHANGES_REQUESTED",
+    "rejected": "REJECTED",
+    "inconclusive": "INCONCLUSIVE",
+}
+# Worst wins when runtimes disagree: one runtime finding the change wrong is
+# the finding, even if another was content with it.
+_VERDICT_SEVERITY = {
+    "ACCEPTED": 0,
+    "SINGLE_RUNTIME": 1,
+    "INCONCLUSIVE": 2,
+    "CHANGES_REQUESTED": 3,
+    "REJECTED": 4,
+}
+
+
+def normalize_verdict(value) -> str:
+    if isinstance(value, str):
+        return _VERDICTS.get(value.strip().lower(), "INCONCLUSIVE")
+    return "INCONCLUSIVE"
+
+
+def worst_verdict(verdicts: list[str]) -> str:
+    if not verdicts:
+        return "INCONCLUSIVE"
+    return max(verdicts, key=lambda verdict: _VERDICT_SEVERITY.get(verdict, 2))
+
+
+def run_conversation(
+    workspace,
+    profile_id: str,
+    prompt: str,
+    title: str,
+) -> str | None:
+    """Run one agent-profile conversation to completion. Returns its id."""
+    request_kwargs = {
+        "workspace": LocalWorkspace(working_dir=workspace.working_dir),
+        "agent_profile_id": uuid.UUID(profile_id),
+        "delete_on_close": False,
+        **automation_conversation_kwargs(),
+    }
+    if automation_user_id:
+        request_kwargs["user_id"] = automation_user_id
+
+    conversation = RemoteConversation.create(
+        workspace, StartConversationRequest(**request_kwargs)
+    )
+    assert isinstance(conversation, RemoteConversation)
+    print(f"  conversation: {conversation.id}")
+
+    try:
+        response = workspace.client.patch(
+            f"/api/conversations/{conversation.id}",
+            json={"title": title[:200]},
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        print(f"  set title failed (non-fatal): {exc}")
+
+    secrets = {}
+    try:
+        secrets = workspace.get_secrets(agent_profile_id=profile_id)
+    except Exception as exc:
+        print(f"  get_secrets() failed (ok if none configured): {exc}")
+    if secrets:
+        # The count only: a profile's secret names are its own business.
+        conversation.update_secrets(secrets)
+        print(f"  injected {len(secrets)} secret(s)")
+
+    try:
+        conversation.send_message(prompt)
+        conversation.run()
+    finally:
+        try:
+            conversation.close()
+        except Exception as exc:
+            print(f"  conversation.close() failed (non-fatal): {exc}")
+    return str(conversation.id)
+
+
+workspace_base = os.path.expanduser(os.environ.get("WORKSPACE_BASE", "/workspace"))
+if not os.path.isabs(workspace_base):
+    print(
+        f"ERROR: WORKSPACE_BASE must be absolute path, got: {workspace_base}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if IS_LOCAL_MODE and not os.path.isdir(workspace_base):
+    print(
+        f"ERROR: WORKSPACE_BASE directory does not exist: {workspace_base}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+print("\n=== SDK WORKSPACE ===")
+if IS_LOCAL_MODE:
+    print(f"  using RemoteWorkspace at {agent_server_url}")
+    workspace_ctx = RemoteWorkspace(
+        host=agent_server_url,
+        api_key=session_key if session_key else None,
+        working_dir=workspace_base,
+    )
+else:
+    print(f"  using OpenHandsCloudWorkspace at {api_url}")
+    workspace_ctx = OpenHandsCloudWorkspace(
+        local_agent_server_mode=True,
+        cloud_api_url=api_url,
+        cloud_api_key=api_key,
+        keep_alive=True,
+    )
+
+
+def execute_cycle(workspace) -> None:
+    """Run one cycle to completion.
+
+    A function rather than inline code so that "nothing to do" can simply
+    return: raising ``SystemExit`` inside the workspace context would reach
+    the context manager's ``__exit__`` as an exception and report a healthy
+    no-op run as a failure.
+    """
+    # --- Claim the next repository in the rotation --------------------------
+    report_phase("Claiming the next repository")
+    print("\n=== CLAIM CYCLE ===")
+    try:
+        claim = cycle_request(
+            "POST",
+            f"/v1/improve/{automation_id}/claim",
+            {"run_id": automation_run_id} if automation_run_id else {},
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 409:
+            # Nothing to rotate over, or this automation is not a program.
+            # Either way the run has nothing to do and saying so plainly beats
+            # failing with a stack trace.
+            print(f"  nothing to do: {exc.response.text}")
+            report_phase("No repositories configured")
+            return
+        raise
+
+    cycle = claim["cycle"]
+    config = claim["config"]
+    rotation = claim.get("rotation") or []
+    cycle_id = cycle["id"]
+    repository = cycle["repository"]
+    repo_label = repository["label"]
+    repo_url = repository["url"]
+    repo_ref = repository.get("ref")
+    print(
+        f"  cycle {cycle_id}: {repo_label} "
+        f"({repository['index'] + 1} of {len(rotation)})"
+    )
+
+    def report_cycle(payload: dict) -> None:
+        """Record cycle progress. Never fatal: the work matters more."""
+        try:
+            cycle_request("PATCH", f"/v1/improve/cycles/{cycle_id}", payload)
+        except Exception as exc:
+            print(f"  cycle update failed (non-fatal): {exc}")
+
+    try:
+        # --- Clone the repository ------------------------------------------
+        report_phase(f"Cloning {repo_label}")
+        print("\n=== CLONE ===")
+        repo_spec = {"url": repo_url}
+        if repo_ref:
+            repo_spec["ref"] = repo_ref
+        clone_result = workspace.clone_repos([repo_spec])
+        if not clone_result.repo_mappings:
+            raise RuntimeError(
+                f"could not clone {repo_label} from {repo_url}: "
+                f"{', '.join(clone_result.failed_repos) or 'no mapping returned'}"
+            )
+        mapping = next(iter(clone_result.repo_mappings.values()))
+        repo_path = mapping.local_path
+        print(f"  cloned to {repo_path}")
+
+        # --- Assemble the context the cycle reasons from --------------------
+        print("\n=== CONTEXT ===")
+        soul = fetch_soul(workspace)
+        identity = read_doc(os.path.join(repo_path, "PROJECT_IDENTITY.md"))
+        print(f"  SOUL.md: {'yes' if soul else 'no'}")
+        print(f"  PROJECT_IDENTITY.md: {'yes' if identity else 'no'}")
+
+        soul_section = quoted_section(
+            "The user's standing preferences (SOUL.md)",
+            soul,
+            "The user has not written a SOUL.md yet. Work to the repository's "
+            "own conventions and do not invent preferences for them.",
+        )
+        identity_section = quoted_section(
+            f"What {repo_label} is for (PROJECT_IDENTITY.md)",
+            identity,
+            f"{repo_label} has no PROJECT_IDENTITY.md. Infer its purpose and "
+            "current goals from its README, its AGENTS.md and its recent "
+            "commits, and say in your report that the document is missing — "
+            "writing a first draft of it is itself a good cycle.",
+        )
+        focus = clamp(config.get("focus"), 4000)
+        focus_section = (
+            f"## Standing guidance for this program\n\n{focus}\n" if focus else ""
+        )
+
+        cycle_dir = os.path.join(workspace.working_dir, CYCLE_DIR_NAME)
+        os.makedirs(cycle_dir, exist_ok=True)
+        report_path = os.path.join(cycle_dir, "report.json")
+
+        branch_prefix = config.get("branch_prefix") or "improve/"
+        branch = f"{branch_prefix}{time.strftime('%Y%m%d-%H%M%S')}"
+        base_ref = f"origin/{repo_ref}" if repo_ref else "origin/HEAD"
+
+        # --- Resolve the runtimes taking part ------------------------------
+        print("\n=== RUNTIMES ===")
+        profiles = list_agent_profiles(workspace)
+        builder_id = str(config["builder_profile_id"])
+        builder = profiles.get(builder_id) or {}
+        builder_runtime = builder.get("runtime")
+        reviewers = choose_reviewers(config, profiles, builder_id)
+        print(f"  builder: {builder.get('name') or builder_id} ({builder_runtime})")
+        if reviewers:
+            print(
+                "  reviewers: "
+                + ", ".join(
+                    f"{reviewer['name'] or reviewer['id']} ({reviewer['runtime']})"
+                    for reviewer in reviewers
+                )
+            )
+        else:
+            print("  reviewers: none — only one runtime is available")
+
+        # --- Builder stage --------------------------------------------------
+        report_cycle(
+            {
+                "status": "BUILDING",
+                "branch": branch,
+                "builder_runtime": builder_runtime,
+            }
+        )
+        report_phase(f"Researching an improvement for {repo_label}")
+        print("\n=== BUILD ===")
+        builder_prompt = render(
+            load_template("builder_prompt.md"),
+            {
+                "REPO_LABEL": repo_label,
+                "REPO_PATH": repo_path,
+                "SOUL_SECTION": soul_section,
+                "IDENTITY_SECTION": identity_section,
+                "FOCUS_SECTION": focus_section,
+                "MAX_CHANGED_FILES": str(config.get("max_changed_files") or 20),
+                "BRANCH": branch,
+                "BRANCH_PREFIX": branch_prefix,
+                "REPORT_PATH": report_path,
+                "PR_INSTRUCTION": (
+                    "- Open a pull request against the default branch. Its body "
+                    "must list the sources you relied on and the checks you ran."
+                    if config.get("open_pr", True)
+                    else "- Do not open a pull request; report the pushed branch "
+                    "instead."
+                ),
+            },
+        )
+        builder_conversation_id = run_conversation(
+            workspace,
+            builder_id,
+            builder_prompt,
+            f"Improve {repo_label}",
+        )
+
+        report = read_json_report(report_path) or {}
+        if not report:
+            print("  WARNING: the builder wrote no readable report")
+        builder_status = str(report.get("status") or "").strip().lower()
+        builder_summary = clamp(report.get("summary")) or (
+            "The builder produced no readable report for this cycle."
+        )
+        sources = normalize_sources(report.get("sources"))
+        risks = string_list(report.get("risks"))
+        pr_url = clamp(report.get("pr_url"), 2000)
+        if pr_url and not pr_url.startswith(("http://", "https://")):
+            pr_url = None
+        reported_branch = clamp(report.get("branch"), 255) or branch
+
+        builder_update = {
+            "builder_conversation_id": builder_conversation_id,
+            "builder_runtime": builder_runtime,
+            "summary": builder_summary,
+            "branch": reported_branch,
+            "sources": sources,
+        }
+        if pr_url:
+            builder_update["pr_url"] = pr_url
+        report_cycle(builder_update)
+        print(f"  status: {builder_status or 'unreported'}")
+        print(f"  sources cited: {len(sources)}")
+
+        # A cycle that changed nothing has nothing to review. Recording it as
+        # NO_CHANGE keeps "researched and decided against it" distinct from
+        # "found nothing to say", which is the difference between a program
+        # that is working and one that is idling.
+        if builder_status in {"no_change", "blocked"} or not reported_branch:
+            report_cycle(
+                {
+                    "status": "COMPLETED",
+                    "verdict": "NO_CHANGE",
+                    "error": (
+                        clamp(report.get("summary"))
+                        if builder_status == "blocked"
+                        else None
+                    ),
+                }
+            )
+            report_phase(f"{repo_label}: no change this cycle")
+            return
+
+        # --- Review stage ---------------------------------------------------
+        if not reviewers:
+            report_cycle({"status": "COMPLETED", "verdict": "SINGLE_RUNTIME"})
+            report_phase(f"{repo_label}: built, no second runtime to review")
+            print("\n  only one runtime available; review skipped")
+            return
+
+        report_cycle({"status": "REVIEWING"})
+        print("\n=== REVIEW ===")
+        reviewer_template = load_template("reviewer_prompt.md")
+        sources_rendered = (
+            "\n".join(
+                f"- {source['url']}"
+                + (f" — {source['note']}" if source.get("note") else "")
+                for source in sources
+            )
+            or "The builder cited no sources, which is itself a finding."
+        )
+        risks_rendered = (
+            "\n".join(f"- {risk}" for risk in risks)
+            or "The builder admitted no risks, which is itself a finding."
+        )
+
+        reviews = []
+        for position, reviewer in enumerate(reviewers, start=1):
+            review_path = os.path.join(cycle_dir, f"review-{position}.json")
+            label = reviewer["name"] or reviewer["id"]
+            report_phase(f"{label} is reviewing the change to {repo_label}")
+            print(f"\n  reviewer {position}: {label} ({reviewer['runtime']})")
+            reviewer_prompt = render(
+                reviewer_template,
+                {
+                    "REPO_LABEL": repo_label,
+                    "REPO_PATH": repo_path,
+                    "BRANCH": reported_branch,
+                    "BASE_REF": base_ref,
+                    "SOUL_SECTION": soul_section,
+                    "IDENTITY_SECTION": identity_section,
+                    "BUILDER_SUMMARY": builder_summary,
+                    "BUILDER_SOURCES": sources_rendered,
+                    "BUILDER_RISKS": risks_rendered,
+                    "REVIEW_PATH": review_path,
+                },
+            )
+            review_conversation_id = None
+            try:
+                review_conversation_id = run_conversation(
+                    workspace,
+                    reviewer["id"],
+                    reviewer_prompt,
+                    f"Review {repo_label}",
+                )
+            except Exception as exc:
+                # One reviewer failing must not discard the others or the
+                # builder's work; it is recorded as an inconclusive review.
+                print(f"  reviewer {label} failed (non-fatal): {exc}")
+
+            review_report = read_json_report(review_path) or {}
+            verdict = normalize_verdict(review_report.get("verdict"))
+            reviews.append(
+                {
+                    "profile_id": reviewer["id"],
+                    "profile_name": reviewer["name"],
+                    "runtime": reviewer["runtime"],
+                    "conversation_id": review_conversation_id,
+                    "verdict": verdict,
+                    "summary": clamp(review_report.get("summary"))
+                    or "This reviewer produced no readable verdict.",
+                    "concerns": string_list(review_report.get("concerns")),
+                    "stale_sources": string_list(review_report.get("stale_sources"))
+                    + string_list(review_report.get("newer_available")),
+                }
+            )
+            print(f"  verdict: {verdict}")
+
+        report_cycle(
+            {
+                "status": "COMPLETED",
+                "verdict": worst_verdict([review["verdict"] for review in reviews]),
+                "reviews": reviews,
+            }
+        )
+        report_phase(f"{repo_label}: cycle complete")
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        report_cycle({"status": "FAILED", "error": detail[:MAX_SUMMARY_CHARS]})
+        raise
+
+
+with workspace_ctx as workspace:
+    execute_cycle(workspace)
+
+print("\n=== RESULT ===")
+print("ALL_OK")
