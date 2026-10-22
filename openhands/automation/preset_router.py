@@ -7,6 +7,9 @@ The service generates the necessary boilerplate code and packages it into a tarb
 Currently supported presets:
 - prompt: Create an automation from a natural language prompt
 - plugin: Create an automation using one or more plugins
+- improve: Create an improvement program that rotates through repositories,
+  researching and implementing one change per cycle and having a second agent
+  runtime review it adversarially
 """
 
 import io
@@ -39,6 +42,7 @@ from openhands.automation.auth import (
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
+from openhands.automation.improve.config import ImproveProgramConfig
 from openhands.automation.models import (
     Automation,
     TarballUpload,
@@ -1127,6 +1131,236 @@ async def create_automation_from_plugin(
         user=user,
         automation=automation,
         properties=creation_properties,
+    )
+
+    return AutomationResponse.model_validate(automation)
+
+
+# --- Improve Preset ---------------------------------------------------------
+
+IMPROVE_PRESET_DIR = PRESETS_DIR / "improve"
+
+_IMPROVE_PRESET_CACHE: dict[str, str] | None = None
+
+
+def _load_improve_preset_files() -> dict[str, str]:
+    """Load and cache improve preset files from disk.
+
+    The prompts are packaged as files rather than built in the request so that
+    what an agent is actually told is reviewable in the repository, next to
+    the code that renders it.
+    """
+    global _IMPROVE_PRESET_CACHE
+    if _IMPROVE_PRESET_CACHE is None:
+        _IMPROVE_PRESET_CACHE = {
+            "main.py": (IMPROVE_PRESET_DIR / "sdk_main.py").read_text(),
+            "setup.sh": (IMPROVE_PRESET_DIR / "setup.sh").read_text(),
+            "builder_prompt.md": (IMPROVE_PRESET_DIR / "builder_prompt.md").read_text(),
+            "reviewer_prompt.md": (
+                IMPROVE_PRESET_DIR / "reviewer_prompt.md"
+            ).read_text(),
+        }
+    return _IMPROVE_PRESET_CACHE
+
+
+def _generate_improve_tarball() -> bytes:
+    """Package the improvement-program runner.
+
+    No configuration goes in the tarball: a run reads the program's current
+    configuration from the claim response, so editing a program never needs
+    its code rebuilt.
+    """
+    preset_files = _load_improve_preset_files()
+    tarball_buffer = io.BytesIO()
+
+    with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
+        _add_file_to_tar(tar, "main.py", preset_files["main.py"])
+        _add_file_to_tar(tar, "builder_prompt.md", preset_files["builder_prompt.md"])
+        _add_file_to_tar(tar, "reviewer_prompt.md", preset_files["reviewer_prompt.md"])
+        _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
+
+    tarball_buffer.seek(0)
+    return tarball_buffer.read()
+
+
+class CreateImproveAutomationRequest(BaseModel):
+    """Request to create an improvement program."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=500)
+    trigger: Trigger = Field(
+        ...,
+        description=(
+            "When a cycle runs. A cron trigger is the normal choice: a program "
+            "is meant to work through its repositories on a cadence."
+        ),
+    )
+    improve: ImproveProgramConfig = Field(
+        ...,
+        description=(
+            "What the program does each cycle: which profile builds, which "
+            "profiles review, and which repositories it rotates over."
+        ),
+    )
+    observability_associations: dict[str, str] | None = Field(default=None)
+    timeout: int | None = Field(
+        default=None,
+        description=build_automation_timeout_description(include_default=True),
+    )
+    keep_alive: bool | None = Field(default=None)
+    enabled: bool = Field(default=True)
+    state: PublicAutomationState | None = Field(default=None)
+
+    @field_validator("observability_associations")
+    @classmethod
+    def validate_observability_associations(
+        cls, v: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        return validate_observability_association_exprs(v)
+
+    @field_validator("timeout")
+    @classmethod
+    def validate_timeout(cls, v: int | None) -> int | None:
+        return validate_automation_timeout(v)
+
+    @field_validator("state", mode="before")
+    @classmethod
+    def validate_public_state(cls, v: Any) -> Any:
+        return reject_public_draft_state(v)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_state(cls, data: Any) -> Any:
+        return normalize_automation_state_enabled(data)
+
+
+@router.post("/improve", status_code=status.HTTP_201_CREATED)
+async def create_improvement_program(
+    body: CreateImproveAutomationRequest,
+    request: Request,
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session),
+    file_store: FileStore = Depends(get_file_store),
+) -> AutomationResponse:
+    """Create an improvement program.
+
+    Each run claims the next repository in the program's rotation, has the
+    builder profile research and implement one improvement there with cited
+    sources, and then has every other available runtime review that work
+    adversarially. Nothing merges itself: a cycle ends in a branch, a pull
+    request and a verdict.
+
+    The rotation is the organization's Git Sync repositories by default, so a
+    program follows the repositories the user already keeps synced instead of
+    needing a second list that can fall out of step with them.
+    """
+    # Every profile the program names must exist before it is scheduled:
+    # discovering a bad id at 3am inside a cycle is a worse error message.
+    await ensure_agent_profile_exists(body.improve.builder_profile_id, request, user)
+    for reviewer_profile_id in body.improve.reviewer_profile_ids:
+        await ensure_agent_profile_exists(reviewer_profile_id, request, user)
+
+    state = model_automation_state(body.state, body.enabled)
+
+    tarball_content = _generate_improve_tarball()
+
+    upload_id = uuid.uuid4()
+    storage_path = _build_storage_path(user.org_id, user.user_id, upload_id)
+    upload = TarballUpload(
+        id=upload_id,
+        user_id=user.user_id,
+        org_id=user.org_id,
+        name=f"improve-program-{_safe_truncate(body.name, 50)}",
+        description="Auto-generated improvement program runner",
+        status=UploadStatus.UPLOADING,
+        storage_path=storage_path,
+    )
+    session.add(upload)
+    await session.flush()
+
+    try:
+        size_bytes = await file_store.write_stream(
+            path=storage_path,
+            stream=_bytes_to_async_iter(tarball_content),
+            content_type="application/x-tar",
+        )
+        upload.status = UploadStatus.COMPLETED
+        upload.size_bytes = size_bytes
+    except Exception as e:
+        logger.exception("Failed to upload generated tarball: %s", e)
+        upload.status = UploadStatus.FAILED
+        upload.error_message = f"Upload failed: {e!s}"
+        await session.flush()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload tarball: {e!s}",
+        )
+
+    await session.flush()
+
+    preset_metadata: dict[str, Any] = {
+        "preset_type": "improve",
+        "improve": body.improve.to_metadata(),
+    }
+
+    try:
+        automation = Automation(
+            user_id=user.user_id,
+            org_id=user.org_id,
+            name=body.name,
+            preset_metadata=preset_metadata,
+            model=None,
+            # The builder profile is also the automation's profile, so the
+            # existing per-automation profile display and validation apply.
+            # The run reads the full cast from its claim, not from this field.
+            agent_profile_id=body.improve.builder_profile_id,
+            trigger=body.trigger.model_dump(),
+            observability_associations=body.observability_associations,
+            tarball_path=build_internal_url(upload_id),
+            setup_script_path="setup.sh",
+            entrypoint=_get_preset_entrypoint(),
+            timeout=default_automation_timeout(body.timeout),
+            keep_alive=body.keep_alive,
+            enabled=automation_state_enabled(state),
+            state=state,
+            telemetry_distinct_id=get_request_telemetry_context(
+                request
+            ).frontend_distinct_id,
+        )
+        session.add(automation)
+        await session.flush()
+        await session.refresh(automation)
+        await mark_git_sync_dirty(session, automation)
+    except Exception as e:
+        try:
+            file_store.delete(storage_path)
+        except Exception:
+            logger.exception("Failed to clean up orphaned upload at %s", storage_path)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create automation: {e!s}",
+        )
+
+    logger.info(
+        "Created improvement program",
+        extra={
+            "automation_id": str(automation.id),
+            "upload_id": str(upload_id),
+            "repository_source": body.improve.repository_source,
+            "reviewer_count": len(body.improve.reviewer_profile_ids),
+        },
+    )
+    await capture_automation_event(
+        "automation_created",
+        request=request,
+        user=user,
+        automation=automation,
+        properties={
+            "creation_path": "improve_preset",
+            "repository_source": body.improve.repository_source,
+            "reviewer_count": len(body.improve.reviewer_profile_ids),
+        },
     )
 
     return AutomationResponse.model_validate(automation)

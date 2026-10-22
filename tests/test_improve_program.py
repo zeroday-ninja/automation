@@ -1,0 +1,509 @@
+"""Tests for improvement programs: creation, rotation and cycle reporting.
+
+An improvement program rotates through repositories, researching and
+implementing one change per cycle and having a second agent runtime review it.
+The behavior worth protecting here is the rotation: that it advances, that it
+wraps, that it survives the repository list changing underneath it, and that
+what the dashboard promises is what the next run actually takes.
+"""
+
+import uuid
+from dataclasses import replace
+
+import pytest
+from sqlalchemy import select
+
+from openhands.automation.app import app
+from openhands.automation.auth import authenticate_request
+from openhands.automation.config import clear_config_cache
+from openhands.automation.models import (
+    Automation,
+    AutomationImproveCycle,
+    AutomationRun,
+    AutomationRunStatus,
+    ImproveCycleStatus,
+    ImproveVerdict,
+)
+
+
+# The org `async_client` authenticates as (see conftest.py).
+ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
+USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
+OTHER_ORG_ID = uuid.UUID("11111111-2222-4333-8444-555555555555")
+
+PRESET = "/api/automation/v1/preset/improve"
+REMOTES = "/api/automation/v1/git-sync/remotes"
+BUILDER = "0a1b2c3d-0000-4000-8000-00000000b111"
+REVIEWER = "0a1b2c3d-0000-4000-8000-00000000c222"
+CRON = {"type": "cron", "schedule": "0 3 * * *", "timezone": "UTC"}
+
+
+@pytest.fixture(autouse=True)
+def local_mode_workspace(tmp_path, monkeypatch):
+    """Local agent-server mode with a writable workspace.
+
+    Local mode is what a self-hosted stack runs, and it is also the mode in
+    which agent profiles are resolved by the agent server at run time rather
+    than looked up over the network at creation time.
+    """
+    monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://localhost:3000")
+    monkeypatch.setenv("AUTOMATION_WORKSPACE_BASE", str(tmp_path))
+    monkeypatch.setenv("AUTOMATION_GIT_SYNC_SECRET", "test-wrapping-secret")
+    clear_config_cache()
+    yield
+    clear_config_cache()
+
+
+@pytest.fixture
+def as_other_org(mock_authenticated_user):
+    """Authenticate as a different organization."""
+
+    def _switch():
+        other = replace(
+            mock_authenticated_user, org_id=OTHER_ORG_ID, user_id=uuid.uuid4()
+        )
+
+        async def override_authenticate():
+            return other
+
+        app.dependency_overrides[authenticate_request] = override_authenticate
+        return other
+
+    return _switch
+
+
+def improve_config(**overrides) -> dict:
+    config = {"builder_profile_id": BUILDER}
+    config.update(overrides)
+    return config
+
+
+async def create_program(async_client, **config_overrides) -> dict:
+    response = await async_client.post(
+        PRESET,
+        json={
+            "name": "Nightly improvement",
+            "trigger": CRON,
+            "improve": improve_config(**config_overrides),
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+async def add_remote(async_client, repo_url: str, label: str) -> dict:
+    response = await async_client.post(
+        REMOTES, json={"repo_url": repo_url, "label": label}
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+async def claim(async_client, automation_id: str, run_id: str | None = None):
+    return await async_client.post(
+        f"/api/automation/v1/improve/{automation_id}/claim",
+        json={"run_id": run_id} if run_id else {},
+    )
+
+
+async def claim_label(async_client, automation_id: str) -> str:
+    """Take the next repository and return its label."""
+    response = await claim(async_client, automation_id)
+    assert response.status_code == 201, response.text
+    return response.json()["cycle"]["repository"]["label"]
+
+
+class TestCreateProgram:
+    """POST /v1/preset/improve."""
+
+    async def test_creates_a_cron_program_owned_by_its_builder_profile(
+        self, async_client, async_session
+    ):
+        # Arrange / Act
+        created = await create_program(async_client, reviewer_profile_ids=[REVIEWER])
+
+        # Assert
+        automation = (
+            (
+                await async_session.execute(
+                    select(Automation).where(Automation.id == uuid.UUID(created["id"]))
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert automation is not None
+        assert automation.preset_metadata["preset_type"] == "improve"
+        assert automation.preset_metadata["improve"]["reviewer_profile_ids"] == [
+            REVIEWER
+        ]
+        # The builder is the automation's profile, so existing per-automation
+        # profile display and validation apply to a program too.
+        assert str(automation.agent_profile_id) == BUILDER
+        # A program has no single prompt: each cycle renders its own.
+        assert automation.prompt is None
+        assert automation.tarball_path
+        assert automation.setup_script_path == "setup.sh"
+
+    async def test_rejects_a_builder_that_reviews_its_own_work(self, async_client):
+        response = await async_client.post(
+            PRESET,
+            json={
+                "name": "Self review",
+                "trigger": CRON,
+                "improve": improve_config(reviewer_profile_ids=[BUILDER]),
+            },
+        )
+        assert response.status_code == 422
+        assert "not independent review" in response.text
+
+    async def test_rejects_an_explicit_rotation_with_no_repositories(
+        self, async_client
+    ):
+        response = await async_client.post(
+            PRESET,
+            json={
+                "name": "Empty rotation",
+                "trigger": CRON,
+                "improve": improve_config(repository_source="explicit"),
+            },
+        )
+        assert response.status_code == 422
+
+    async def test_rejects_a_branch_prefix_git_would_refuse(self, async_client):
+        response = await async_client.post(
+            PRESET,
+            json={
+                "name": "Bad prefix",
+                "trigger": CRON,
+                "improve": improve_config(branch_prefix="improve branch~"),
+            },
+        )
+        assert response.status_code == 422
+
+
+class TestRotation:
+    """Which repository a cycle takes, and what the dashboard promises."""
+
+    async def test_rotates_through_git_sync_repositories_in_order_and_wraps(
+        self, async_client
+    ):
+        # Arrange: three synced repositories, created in this order.
+        for label in ("alpha", "beta", "gamma"):
+            await add_remote(async_client, f"https://github.com/acme/{label}", label)
+        program = await create_program(async_client)
+
+        # Act: four cycles over three repositories.
+        taken = [await claim_label(async_client, program["id"]) for _ in range(4)]
+
+        # Assert: each run moves on, and the fourth comes back round.
+        assert taken == ["alpha", "beta", "gamma", "alpha"]
+
+    async def test_rotation_endpoint_predicts_what_the_next_claim_takes(
+        self, async_client
+    ):
+        # Arrange
+        for label in ("alpha", "beta"):
+            await add_remote(async_client, f"https://github.com/acme/{label}", label)
+        program = await create_program(async_client)
+        await claim_label(async_client, program["id"])
+
+        # Act
+        rotation = await async_client.get(
+            f"/api/automation/v1/improve/{program['id']}/rotation"
+        )
+        assert rotation.status_code == 200, rotation.text
+        predicted = rotation.json()
+        promised = predicted["repositories"][predicted["next_index"]]["label"]
+
+        # Assert: the promise and the claim come from the same function.
+        assert promised == await claim_label(async_client, program["id"])
+
+    async def test_continues_from_the_repository_it_took_when_one_is_removed(
+        self, async_client
+    ):
+        # Arrange: three repositories; a cycle takes the second.
+        remotes = {}
+        for label in ("alpha", "beta", "gamma"):
+            remotes[label] = await add_remote(
+                async_client, f"https://github.com/acme/{label}", label
+            )
+        program = await create_program(async_client)
+        assert await claim_label(async_client, program["id"]) == "alpha"
+        assert await claim_label(async_client, program["id"]) == "beta"
+
+        # Act: the repository it just took is removed from the rotation.
+        removed = await async_client.delete(f"{REMOTES}/{remotes['beta']['id']}")
+        assert removed.status_code in (200, 204), removed.text
+
+        # Assert: it carries on rather than restarting at the top.
+        assert await claim_label(async_client, program["id"]) == "gamma"
+
+    async def test_rotates_an_explicit_list_instead_of_git_sync(self, async_client):
+        # Arrange: a synced repository the program must ignore.
+        await add_remote(async_client, "https://github.com/acme/synced", "synced")
+        program = await create_program(
+            async_client,
+            repository_source="explicit",
+            repositories=[
+                {"label": "one", "url": "https://github.com/acme/one"},
+                {"label": "two", "url": "https://github.com/acme/two", "ref": "dev"},
+            ],
+        )
+
+        # Act / Assert
+        assert await claim_label(async_client, program["id"]) == "one"
+        second = await claim(async_client, program["id"])
+        repository = second.json()["cycle"]["repository"]
+        assert (repository["label"], repository["ref"]) == ("two", "dev")
+
+    async def test_rotates_only_the_labels_the_program_names(self, async_client):
+        for label in ("alpha", "beta", "gamma"):
+            await add_remote(async_client, f"https://github.com/acme/{label}", label)
+        program = await create_program(
+            async_client, repository_labels=["alpha", "gamma"]
+        )
+
+        taken = [await claim_label(async_client, program["id"]) for _ in range(3)]
+        assert taken == ["alpha", "gamma", "alpha"]
+
+    async def test_claiming_with_nothing_synced_is_a_conflict_not_a_crash(
+        self, async_client
+    ):
+        program = await create_program(async_client)
+        response = await claim(async_client, program["id"])
+        assert response.status_code == 409
+        assert "rotate over" in response.text
+
+    async def test_claiming_a_plain_automation_is_a_conflict(
+        self, async_client, async_session
+    ):
+        automation = Automation(
+            user_id=USER_ID,
+            org_id=ORG_ID,
+            name="Not a program",
+            prompt="do a thing",
+            trigger=CRON,
+            tarball_path="internal://not-a-program",
+            entrypoint="python main.py",
+        )
+        async_session.add(automation)
+        await async_session.flush()
+
+        response = await claim(async_client, str(automation.id))
+        assert response.status_code == 409
+        assert "not an improvement program" in response.text.lower()
+
+    async def test_does_not_carry_credentials_out_of_the_git_sync_config(
+        self, async_client
+    ):
+        # Arrange: a repository URL with a credential embedded in it.
+        await add_remote(
+            async_client,
+            "https://someone:s3cret@github.com/acme/alpha",
+            "alpha",
+        )
+        program = await create_program(async_client)
+
+        # Act
+        response = await claim(async_client, program["id"])
+
+        # Assert: the cycle records a clonable URL, not the secret.
+        url = response.json()["cycle"]["repository"]["url"]
+        assert url == "https://github.com/acme/alpha"
+        assert "s3cret" not in response.text
+
+    async def test_another_org_cannot_claim_a_cycle(self, async_client, as_other_org):
+        await add_remote(async_client, "https://github.com/acme/alpha", "alpha")
+        program = await create_program(async_client)
+
+        as_other_org()
+        response = await claim(async_client, program["id"])
+        assert response.status_code == 404
+
+    async def test_links_the_cycle_to_the_run_that_claimed_it(
+        self, async_client, async_session
+    ):
+        await add_remote(async_client, "https://github.com/acme/alpha", "alpha")
+        program = await create_program(async_client)
+        run = AutomationRun(
+            automation_id=uuid.UUID(program["id"]),
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.flush()
+
+        response = await claim(async_client, program["id"], run_id=str(run.id))
+        assert response.status_code == 201, response.text
+        assert response.json()["cycle"]["run_id"] == str(run.id)
+
+    async def test_rejects_a_run_from_another_automation(
+        self, async_client, async_session
+    ):
+        await add_remote(async_client, "https://github.com/acme/alpha", "alpha")
+        program = await create_program(async_client)
+        other = Automation(
+            user_id=USER_ID,
+            org_id=ORG_ID,
+            name="Other",
+            prompt="x",
+            trigger=CRON,
+            tarball_path="internal://other",
+            entrypoint="python main.py",
+        )
+        async_session.add(other)
+        await async_session.flush()
+        stray = AutomationRun(
+            automation_id=other.id, status=AutomationRunStatus.RUNNING
+        )
+        async_session.add(stray)
+        await async_session.flush()
+
+        response = await claim(async_client, program["id"], run_id=str(stray.id))
+        assert response.status_code == 400
+
+    async def test_a_failed_cycle_still_advances_the_rotation(
+        self, async_client, async_session
+    ):
+        # Arrange: a cycle that took alpha and then failed.
+        for label in ("alpha", "beta"):
+            await add_remote(async_client, f"https://github.com/acme/{label}", label)
+        program = await create_program(async_client)
+        first = await claim(async_client, program["id"])
+        cycle_id = first.json()["cycle"]["id"]
+        failed = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={"status": "FAILED", "error": "clone failed"},
+        )
+        assert failed.status_code == 200, failed.text
+
+        # Act / Assert: the next run moves on instead of retrying alpha
+        # forever; alpha comes round again on the next lap.
+        assert await claim_label(async_client, program["id"]) == "beta"
+
+
+class TestCycleReporting:
+    """PATCH /v1/improve/cycles/{id} and the history the dashboard reads."""
+
+    async def _claimed_cycle(self, async_client) -> tuple[dict, str]:
+        await add_remote(async_client, "https://github.com/acme/alpha", "alpha")
+        program = await create_program(async_client)
+        response = await claim(async_client, program["id"])
+        return program, response.json()["cycle"]["id"]
+
+    async def test_records_the_builder_stage_then_the_reviews(
+        self, async_client, async_session
+    ):
+        # Arrange
+        program, cycle_id = await self._claimed_cycle(async_client)
+
+        # Act: the builder reports, then the reviewer does.
+        build = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "status": "BUILDING",
+                "builder_runtime": "claude-code",
+                "summary": "Pinned the parser to the patched release.",
+                "branch": "improve/20261021-030000",
+                "pr_url": "https://github.com/acme/alpha/pull/7",
+                "sources": [
+                    {
+                        "url": "https://example.com/changelog",
+                        "title": "Parser 3.2 changelog",
+                        "note": "documents the fix this change relies on",
+                    }
+                ],
+            },
+        )
+        assert build.status_code == 200, build.text
+
+        reviewed = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "status": "COMPLETED",
+                "verdict": "CHANGES_REQUESTED",
+                "reviews": [
+                    {
+                        "runtime": "codex",
+                        "verdict": "CHANGES_REQUESTED",
+                        "summary": "The cited changelog covers a later version.",
+                        "concerns": ["the pin does not match the cited release"],
+                        "stale_sources": ["https://example.com/changelog"],
+                    }
+                ],
+            },
+        )
+
+        # Assert
+        assert reviewed.status_code == 200, reviewed.text
+        body = reviewed.json()
+        assert body["verdict"] == "CHANGES_REQUESTED"
+        assert body["builder_runtime"] == "claude-code"
+        assert body["sources"][0]["url"] == "https://example.com/changelog"
+        assert body["reviews"][0]["runtime"] == "codex"
+        assert body["completed_at"] is not None
+
+        stored = (
+            (
+                await async_session.execute(
+                    select(AutomationImproveCycle).where(
+                        AutomationImproveCycle.id == uuid.UUID(cycle_id)
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert stored is not None
+        assert stored.status is ImproveCycleStatus.COMPLETED
+        assert stored.verdict is ImproveVerdict.CHANGES_REQUESTED
+
+    async def test_a_finished_cycle_cannot_be_rewritten(self, async_client):
+        program, cycle_id = await self._claimed_cycle(async_client)
+        first = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={"status": "COMPLETED", "verdict": "ACCEPTED"},
+        )
+        assert first.status_code == 200, first.text
+
+        late = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={"status": "COMPLETED", "verdict": "REJECTED"},
+        )
+        assert late.status_code == 409
+
+    async def test_rejects_a_pull_request_link_that_is_not_http(self, async_client):
+        program, cycle_id = await self._claimed_cycle(async_client)
+        response = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={"pr_url": "javascript:alert(1)"},
+        )
+        assert response.status_code == 422
+
+    async def test_lists_history_newest_first(self, async_client):
+        for label in ("alpha", "beta"):
+            await add_remote(async_client, f"https://github.com/acme/{label}", label)
+        program = await create_program(async_client)
+        await claim_label(async_client, program["id"])
+        await claim_label(async_client, program["id"])
+
+        response = await async_client.get(
+            f"/api/automation/v1/improve/{program['id']}/cycles"
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["total"] == 2
+        assert [cycle["repository"]["label"] for cycle in body["cycles"]] == [
+            "beta",
+            "alpha",
+        ]
+
+    async def test_another_org_cannot_read_history(self, async_client, as_other_org):
+        await add_remote(async_client, "https://github.com/acme/alpha", "alpha")
+        program = await create_program(async_client)
+
+        as_other_org()
+        response = await async_client.get(
+            f"/api/automation/v1/improve/{program['id']}/cycles"
+        )
+        assert response.status_code == 404
