@@ -67,6 +67,30 @@ class TestReadJsonReport:
         assert report.read_json_report(str(path)) is None
 
 
+class TestParseJsonReport:
+    """Pulling a report out of whatever the agent actually said."""
+
+    def test_reads_a_bare_object(self, report):
+        assert report.parse_json_report('{"verdict": "accepted"}') == {
+            "verdict": "accepted"
+        }
+
+    def test_unwraps_a_fence_and_ignores_surrounding_prose(self, report):
+        text = (
+            "Here is my review:\n"
+            '```json\n{"verdict": "rejected"}\n```\n'
+            "Hope that helps."
+        )
+
+        assert report.parse_json_report(text) == {"verdict": "rejected"}
+
+    def test_returns_nothing_for_text_with_no_object(self, report):
+        # A model that answered in prose has said nothing a cycle can record,
+        # and inventing a verdict from it would be worse than recording none.
+        assert report.parse_json_report("Looks fine to me.") is None
+        assert report.parse_json_report("") is None
+
+
 class TestNormalizeSources:
     def test_keeps_a_full_citation(self, report):
         sources = report.normalize_sources(

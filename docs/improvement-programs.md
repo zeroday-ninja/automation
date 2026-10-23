@@ -144,6 +144,15 @@ procedural and round six calling the compressed result too thin — each finding
 true, and the author oscillating between them. Narrow code changes converged
 in one round over the same period.
 
+## A report that was said rather than written
+
+The contract asks each stage to write its JSON to a file. A weaker runtime
+often does the work and then *answers* instead, and throwing the cycle away
+over where the JSON landed wastes the whole run. When the file is missing and
+the conversation finished, the run reads the agent's final response and parses
+a report out of it. The file is still what is asked for and still read first;
+this only catches what would otherwise be lost.
+
 ## A reviewer that failed does not vote
 
 The cycle's verdict is the worst of the verdicts from reviewers that actually
