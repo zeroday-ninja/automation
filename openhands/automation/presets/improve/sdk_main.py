@@ -121,6 +121,7 @@ from openhands.workspace import OpenHandsCloudWorkspace  # noqa: E402
 # report parsing lives in a module that can be imported without side effects.
 from report import (  # noqa: E402
     MAX_SUMMARY_CHARS,
+    parse_json_report,
     acp_server_from_detail,
     cycle_verdict,
     choose_reviewers,
@@ -155,6 +156,33 @@ def cycle_request(method: str, path: str, payload: dict | None = None) -> dict:
     )
     response.raise_for_status()
     return response.json()
+
+
+def report_from_final_response(workspace, conversation_id: str | None) -> dict | None:
+    """The agent's last message, parsed as its report.
+
+    The contract asks for a file. A weaker runtime often does the work and
+    then *answers* instead of writing it — the cycle is done, and throwing it
+    away over where the JSON landed wastes the whole run. This is the fallback
+    for that, not a replacement: the file is still what is asked for and still
+    read first.
+    """
+    if not conversation_id:
+        return None
+    try:
+        response = workspace.client.get(
+            f"/api/conversations/{conversation_id}/agent_final_response"
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        print(f"  final-response fallback failed (non-fatal): {exc}")
+        return None
+    text = payload.get("response") if isinstance(payload, dict) else None
+    parsed = parse_json_report(text or "")
+    if parsed is not None:
+        print("  recovered the report from the agent's final answer")
+    return parsed
 
 
 def _no_updates_answer(error: str | None) -> str | None:
@@ -580,6 +608,10 @@ def execute_cycle(workspace) -> None:
 
         report = read_json_report(report_path) or {}
         if not report:
+            report = (
+                report_from_final_response(workspace, builder_conversation_id) or {}
+            )
+        if not report:
             print("  WARNING: the builder wrote no readable report")
         builder_status = str(report.get("status") or "").strip().lower()
         builder_summary = clamp(report.get("summary")) or (
@@ -692,6 +724,10 @@ def execute_cycle(workspace) -> None:
                 print(f"  reviewer {label} failed (non-fatal): {review_error}")
 
             review_report = read_json_report(review_path) or {}
+            if not review_report and review_error is None:
+                review_report = (
+                    report_from_final_response(workspace, review_conversation_id) or {}
+                )
             verdict = normalize_verdict(review_report.get("verdict"))
             reviews.append(
                 {

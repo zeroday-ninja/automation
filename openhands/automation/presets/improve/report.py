@@ -21,6 +21,30 @@ MAX_SOURCES = 40
 MAX_SOUL_SUGGESTIONS = 10
 
 
+def parse_json_report(text: str) -> dict | None:
+    """Pull a JSON report out of free text.
+
+    Shared by the file and the fallback below, because an agent that answers
+    in chat instead of writing the file makes exactly the same formatting
+    slips — a fence, a sentence before the object.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[: -len("```")]
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        parsed = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def read_json_report(path: str) -> dict | None:
     """Read an agent-written JSON report, tolerating a fenced code block.
 
@@ -33,20 +57,10 @@ def read_json_report(path: str) -> dict | None:
             raw = handle.read()
     except OSError:
         return None
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1]
-        if text.rstrip().endswith("```"):
-            text = text.rstrip()[: -len("```")]
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end <= start:
-        return None
-    try:
-        parsed = json.loads(text[start : end + 1])
-    except json.JSONDecodeError as exc:
-        print(f"  report at {path} is not valid JSON: {exc}")
-        return None
-    return parsed if isinstance(parsed, dict) else None
+    parsed = parse_json_report(raw)
+    if parsed is None and raw.strip():
+        print(f"  report at {path} is not a readable JSON object")
+    return parsed
 
 
 def clamp(value, limit: int = MAX_SUMMARY_CHARS) -> str | None:
