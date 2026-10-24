@@ -121,11 +121,15 @@ from openhands.workspace import OpenHandsCloudWorkspace  # noqa: E402
 # report parsing lives in a module that can be imported without side effects.
 from context import (  # noqa: E402
     fetch_identity_set,
+    git_commit_range,
     identity_sections,
+    normalize_checks,
     project_identity_sections,
+    prompt_digest,
     read_project_identity,
 )
 from report import (  # noqa: E402
+    VERDICT_RULE_VERSION,
     MAX_SUMMARY_CHARS,
     parse_json_report,
     acp_server_from_detail,
@@ -487,9 +491,7 @@ def execute_cycle(workspace) -> None:
             print(f"  WARNING: {identity_note}")
 
         soul_section = identity_sections(identity_documents, identity_note)
-        identity_section = project_identity_sections(
-            project_documents, repo_label
-        )
+        identity_section = project_identity_sections(project_documents, repo_label)
         focus = clamp(config.get("focus"), 4000)
         focus_section = (
             f"## Standing guidance for this program\n\n{focus}\n" if focus else ""
@@ -591,13 +593,25 @@ def execute_cycle(workspace) -> None:
             pr_url = None
         reported_branch = clamp(report.get("branch"), 255) or branch
 
+        # The evidence, not just the account of it. Every one of these is
+        # asked for in the builder's prompt and was, until now, read by
+        # nothing — so a merged change could not be traced back to the
+        # commit, the checks, or the prompt that produced it.
         builder_update = {
             "builder_conversation_id": builder_conversation_id,
             "builder_runtime": builder_runtime,
             "summary": builder_summary,
             "branch": reported_branch,
             "sources": sources,
+            "changed_files": string_list(report.get("changed_files"))[:200],
+            "checks": normalize_checks(report.get("checks")),
+            "followups": string_list(report.get("followups"))[:40],
+            "risks": risks[:40],
+            "prompt_digest": prompt_digest(builder_prompt),
+            "verdict_rule_version": VERDICT_RULE_VERSION,
         }
+        shas = git_commit_range(repo_path, base_ref, reported_branch)
+        builder_update.update(shas)
         if soul_suggestions:
             builder_update["soul_suggestions"] = soul_suggestions
         if pr_url:
@@ -710,6 +724,12 @@ def execute_cycle(workspace) -> None:
                     "concerns": string_list(review_report.get("concerns")),
                     "stale_sources": string_list(review_report.get("stale_sources"))
                     + string_list(review_report.get("newer_available")),
+                    # Evidence confirmed, not only evidence disputed. An
+                    # account with one half is a lopsided account of a review.
+                    "verified_sources": string_list(
+                        review_report.get("verified_sources")
+                    ),
+                    "checks": normalize_checks(review_report.get("checks")),
                     "updates_checked": clamp(review_report.get("updates_checked"))
                     or _no_updates_answer(review_error),
                 }

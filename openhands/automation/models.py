@@ -1105,6 +1105,39 @@ class AutomationImproveCycle(Base):
 
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # --- Audit ---------------------------------------------------------
+    # What the change actually was, so a merged commit can be traced back to
+    # the prompt and the sources that produced it. Without a SHA there is no
+    # such path at all, which is why this is the highest-value column here.
+    base_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    head_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # Files the builder says it changed, the checks it ran with their
+    # results, what it deliberately did not do, and the weakest part of its
+    # own change. All four are asked for in the prompt and were, until now,
+    # parsed by nothing.
+    changed_files: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    checks: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    followups: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    risks: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+
+    # Which prompt produced this. The digest rather than the text: the
+    # rendered prompt embeds the user's identity and the repository's, which
+    # is not something to store by default.
+    prompt_digest: Mapped[str | None] = mapped_column(String(71), nullable=True)
+
+    # Which rule turned a set of reviews into this verdict. The aggregation
+    # lives in code that ships into the sandbox, so without this, editing the
+    # severity table would retroactively reinterpret every past verdict.
+    verdict_rule_version: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
+
+    # Closed by the janitor rather than by the run that claimed it. An
+    # absence of evidence, deliberately not a verdict: a reaped cycle must not
+    # be coloured like a failure somebody reported.
+    reaped: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=text("CURRENT_TIMESTAMP"),

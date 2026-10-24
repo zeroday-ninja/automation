@@ -153,6 +153,13 @@ _VERDICTS = {
 }
 # Worst wins when runtimes disagree: one runtime finding the change wrong is
 # the finding, even if another was content with it.
+#: Which rule turns a set of reviews into one verdict.
+#:
+#: Bumped whenever the severity table or the aggregation changes. Recorded on
+#: every cycle, because this code ships into the sandbox: without it, editing
+#: the table below would retroactively reinterpret every verdict ever stored.
+VERDICT_RULE_VERSION = "worst-of-judged/1"
+
 _VERDICT_SEVERITY = {
     "ACCEPTED": 0,
     "SINGLE_RUNTIME": 1,

@@ -12,7 +12,9 @@ discovered when a prompt is silently truncated somewhere downstream.
 
 from __future__ import annotations
 
+import hashlib
 import os
+import subprocess
 
 
 #: Largest a single document may be before it is cut, in characters.
@@ -250,3 +252,85 @@ def fetch_soul(workspace) -> str | None:
     if len(text) > MAX_DOC_CHARS:
         text = text[:MAX_DOC_CHARS] + "\n\n[truncated]"
     return text
+
+
+def prompt_digest(prompt: str) -> str:
+    """A fingerprint of the rendered prompt.
+
+    The digest rather than the text: the rendered prompt embeds the user's
+    identity and the repository's, which is not something to store by default.
+    It is still enough to answer "was this change made under the instructions
+    I think it was".
+    """
+    return "sha256:" + hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+
+def normalize_checks(raw: object) -> list:
+    """Checks as typed records: a command, whether it passed, and detail.
+
+    Accepts the shapes an agent actually produces — a list of strings, or of
+    objects — because a check recorded loosely is still evidence, and refusing
+    it would mean recording nothing.
+    """
+    if not isinstance(raw, list):
+        return []
+    checks: list = []
+    for entry in raw[:40]:
+        if isinstance(entry, str) and entry.strip():
+            checks.append({"command": entry.strip()[:500], "passed": None})
+            continue
+        if not isinstance(entry, dict):
+            continue
+        command = entry.get("command") or entry.get("name") or entry.get("check")
+        if not isinstance(command, str) or not command.strip():
+            continue
+        passed = entry.get("passed")
+        if passed is None and isinstance(entry.get("result"), str):
+            text = entry["result"].strip().lower()
+            # "pass"/"fail" is what agents write; anything else stays None,
+            # because an outcome nobody can read is not a failure.
+            passed = (
+                True
+                if text.startswith("pass")
+                else (False if text.startswith("fail") else None)
+            )
+        detail = entry.get("detail") or entry.get("result") or entry.get("output")
+        checks.append(
+            {
+                "command": command.strip()[:500],
+                "passed": passed if isinstance(passed, bool) else None,
+                "detail": (
+                    str(detail)[:2000] if isinstance(detail, (str, int)) else None
+                ),
+            }
+        )
+    return checks
+
+
+def git_commit_range(repo_path: str, base_ref: str, branch: str) -> dict:
+    """The commits this cycle started from and produced.
+
+    Without a head SHA there is no path from a merged change back to the
+    prompt and the sources behind it, which is the one question an audit trail
+    exists to answer. Best-effort — a repository in an unexpected state should
+    not fail a cycle that otherwise succeeded — but a failure is reported in
+    the run log rather than passed over in silence.
+    """
+    shas: dict = {}
+    for field, ref in (("base_sha", base_ref), ("head_sha", branch)):
+        try:
+            result = subprocess.run(
+                ["git", "-C", repo_path, "rev-parse", ref],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"  could not read {ref}: {exc}")
+            continue
+        if result.returncode != 0:
+            print(f"  could not read {ref}: {result.stderr.strip()[:200]}")
+            continue
+        shas[field] = result.stdout.strip()[:64]
+    return shas

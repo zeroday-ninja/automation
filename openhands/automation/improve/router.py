@@ -220,9 +220,23 @@ async def update_cycle(
         "branch",
         "pr_url",
         "error",
+        # Audit: what the change was, what was run, and which rule judged it.
+        # Every one is optional, because a run's code is packaged into a
+        # tarball at program-creation time and an older tarball will not send
+        # them. A cycle that reports less than this build can store is a
+        # cycle with less evidence, not a failed request.
+        "base_sha",
+        "head_sha",
+        "changed_files",
+        "followups",
+        "risks",
+        "prompt_digest",
+        "verdict_rule_version",
     ):
         if field in updates:
             setattr(cycle, field, updates[field])
+    if "checks" in updates and body.checks is not None:
+        cycle.checks = [check.model_dump(mode="json") for check in body.checks]
     if "sources" in updates and body.sources is not None:
         cycle.sources = [source.model_dump(mode="json") for source in body.sources]
     if "reviews" in updates and body.reviews is not None:
