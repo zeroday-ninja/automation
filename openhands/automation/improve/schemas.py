@@ -537,6 +537,13 @@ class CycleResponse(BaseModel):
     change_class: str | None = None
     claimed_change_class: str | None = None
     change_evidence: dict[str, Any] | None = None
+    #: What this cycle left for the next one when its runtime ran out, and the
+    #: chain in both directions. Absent from the response until now, which
+    #: made the whole handoff invisible: it was written, stored and resumed
+    #: from, and no client could see any of that had happened.
+    handoff: dict[str, Any] | None = None
+    resumed_from_cycle_id: uuid.UUID | None = None
+    resumed_by_cycle_id: uuid.UUID | None = None
     gate_decisions: list[dict[str, Any]] | None = None
     injected_lesson_ids: list[uuid.UUID] | None = None
     judge_attestation: dict[str, Any] | None = None
@@ -591,6 +598,9 @@ class CycleResponse(BaseModel):
             change_class=cycle.change_class,
             claimed_change_class=cycle.claimed_change_class,
             change_evidence=cycle.change_evidence,
+            handoff=cycle.handoff,
+            resumed_from_cycle_id=cycle.resumed_from_cycle_id,
+            resumed_by_cycle_id=cycle.resumed_by_cycle_id,
             gate_decisions=cycle.gate_decisions,
             injected_lesson_ids=cycle.injected_lesson_ids,
             judge_attestation=cycle.judge_attestation,
