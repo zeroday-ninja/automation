@@ -91,6 +91,11 @@ class CycleReview(BaseModel):
             "what makes the review independent of the builder."
         ),
     )
+    #: Where this reviewer's runtime moved mid-review, if it did. A reviewer
+    #: can run out of usage and fail over just as a builder can, and
+    #: `runtime` above is then the one that *finished* — so without this the
+    #: record says a runtime reviewed the change that did not review all of it.
+    runtime_switches: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
     conversation_id: str | None = Field(default=None, max_length=64)
     verdict: ImproveVerdict | None = None
     summary: str | None = Field(default=None, max_length=MAX_SUMMARY)

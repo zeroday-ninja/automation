@@ -49,7 +49,11 @@ def upgrade() -> None:
                 "reaped",
                 sa.Boolean(),
                 nullable=False,
-                server_default=sa.text("0"),
+                # sa.false(), not a literal 0: SQLite takes either, and
+                # PostgreSQL refuses an integer default on a boolean column
+                # outright, so a literal breaks the migration on the engine
+                # the service is actually written for.
+                server_default=sa.false(),
             )
         )
 

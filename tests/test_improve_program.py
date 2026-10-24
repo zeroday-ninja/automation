@@ -1487,3 +1487,143 @@ class TestTheHandoffIsVisible:
         )
         by_id = {c["id"]: c for c in history.json()["cycles"]}
         assert by_id[first]["resumed_by_cycle_id"] == second["id"]
+
+
+class TestTheReviewRecordThePresetSends:
+    """The review the runner builds must be the review the service accepts.
+
+    `CycleReview` forbids extra fields, the runner assembles its review record
+    in `sdk_main.py` — which cannot be imported by a test — and nothing
+    compared the two. So a field added to the record and not to the schema
+    made *every cycle with a reviewer* fail its final report: a 422 on the last
+    PATCH left the cycle in REVIEWING, and the janitor closed it as FAILED
+    with "its run ended as COMPLETED". The work was done, reviewed and
+    accepted, and the record said it failed.
+    """
+
+    async def test_every_field_the_runner_sends_is_accepted(self, async_client):
+        # Arrange
+        await add_remote(async_client, "https://github.com/acme/alpha", "alpha")
+        program = await create_program(async_client)
+        cycle_id = (await claim(async_client, program["id"])).json()["cycle"]["id"]
+
+        # Act: the shape `sdk_main.py` builds, field for field.
+        response = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "status": "COMPLETED",
+                "verdict": "ACCEPTED",
+                "reviews": [
+                    {
+                        "profile_id": REVIEWER,
+                        "profile_name": "codex",
+                        "runtime": "codex",
+                        "runtime_switches": [
+                            {
+                                "from": "claude-code",
+                                "to": "codex",
+                                "reason": "usage_limit",
+                                "at": "2026-10-24T17:00:00+00:00",
+                            }
+                        ],
+                        "conversation_id": "conv-review",
+                        "verdict": "ACCEPTED",
+                        "failed": False,
+                        "summary": "Additive only.",
+                        "concerns": [],
+                        "stale_sources": [],
+                        "verified_sources": ["https://example.test/doc"],
+                        "updates_checked": "Nothing supersedes it.",
+                        "checks": [{"command": "pytest", "passed": True}],
+                    }
+                ],
+                "gate_decisions": [
+                    {
+                        "phase": "publish",
+                        "route": "approve",
+                        "trigger": "asked the service",
+                        "rationale": "additive publishes on its own account",
+                        "decided_by": "service",
+                    }
+                ],
+                "runtime_observations": [
+                    {
+                        "runtime": "codex",
+                        "outcome": "ok",
+                        "observed_at": "2026-10-24T17:30:00+00:00",
+                    }
+                ],
+                "injected_lesson_ids": [],
+            },
+        )
+
+        # Assert: accepted, and the cycle actually reaches COMPLETED — which is
+        # what keeps the janitor from closing it as an abandonment.
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "COMPLETED"
+        assert body["verdict"] == "ACCEPTED"
+        assert body["reviews"][0]["runtime_switches"][0]["to"] == "codex"
+        assert body["reaped"] is False
+
+    async def test_a_reviewer_that_switched_is_recorded_as_the_one_that_finished(
+        self, async_client
+    ):
+        # `runtime` is whichever finished, so without the route the record
+        # says a runtime reviewed a change it only reviewed part of.
+        await add_remote(async_client, "https://github.com/acme/beta", "beta")
+        program = await create_program(async_client)
+        cycle_id = (await claim(async_client, program["id"])).json()["cycle"]["id"]
+
+        response = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "reviews": [
+                    {
+                        "runtime": "codex",
+                        "runtime_switches": [
+                            {
+                                "from": "claude-code",
+                                "to": "codex",
+                                "reason": "usage_limit",
+                            }
+                        ],
+                        "verdict": "ACCEPTED",
+                    }
+                ]
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        review = response.json()["reviews"][0]
+        assert review["runtime"] == "codex"
+        assert review["runtime_switches"][0]["from"] == "claude-code"
+
+    async def test_a_rejected_report_can_still_be_landed_with_its_reason(
+        self, async_client
+    ):
+        # The runner's recovery path after a rejection: drop everything that
+        # could have caused it and land the terminal state with the reason, so
+        # the cycle is a completed one with a gap rather than an abandoned one.
+        await add_remote(async_client, "https://github.com/acme/gamma", "gamma")
+        program = await create_program(async_client)
+        cycle_id = (await claim(async_client, program["id"])).json()["cycle"]["id"]
+
+        rejected = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={"reviews": [{"verdict": "ACCEPTED", "invented_field": 1}]},
+        )
+        recovery = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "status": "COMPLETED",
+                "verdict": "ACCEPTED",
+                "error": "the service rejected its full report: 422",
+            },
+        )
+
+        assert rejected.status_code == 422
+        assert recovery.status_code == 200, recovery.text
+        body = recovery.json()
+        assert body["status"] == "COMPLETED"
+        assert "rejected its full report" in body["error"]
