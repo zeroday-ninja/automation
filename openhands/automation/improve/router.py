@@ -38,6 +38,7 @@ from openhands.automation.improve.rotation import (
     next_index,
     resolve_rotation,
 )
+from openhands.automation.improve.routing import GateDecision, normalize_route
 from openhands.automation.improve.schemas import (
     ClaimCycleRequest,
     ClaimCycleResponse,
@@ -45,6 +46,7 @@ from openhands.automation.improve.schemas import (
     CycleRepository,
     CycleResponse,
     HandoffResume,
+    ResolveCycleRequest,
     RotationResponse,
     UpdateCycleRequest,
 )
@@ -57,6 +59,7 @@ from openhands.automation.models import (
     AutomationImproveCycle,
     AutomationRun,
     ImproveCycleStatus,
+    ImproveVerdict,
     TarballUpload,
     UploadStatus,
 )
@@ -79,6 +82,10 @@ _require_manage_automations = require_permission("manage_automations")
 _TERMINAL_STATUSES = frozenset(
     {ImproveCycleStatus.COMPLETED, ImproveCycleStatus.FAILED}
 )
+
+#: Most gate decisions kept on one cycle. The log is append-only, so without a
+#: bound a cycle that loops could grow its own row without limit.
+MAX_GATE_DECISIONS = 200
 
 
 async def _load_program(
@@ -351,6 +358,28 @@ async def update_cycle(
         # one without is treated as absent rather than stored and half-
         # trusted by whatever picks it up.
         cycle.handoff = parsed.as_dict() if parsed is not None else None
+    if "gate_decisions" in updates and body.gate_decisions:
+        # Appended, never replaced: a routing decision that was taken cannot
+        # be un-taken by a later report, and the log is what answers "why did
+        # this go that way" after the branch and its sandbox are gone.
+        recorded = list(cycle.gate_decisions or [])
+        for entry in body.gate_decisions:
+            if not isinstance(entry, dict):
+                continue
+            accepted, problem = _accept_gate_decision(entry)
+            if accepted is None:
+                # Not dropped. A decision the service could not read is itself
+                # something the audit trail has to show, or a client with a
+                # bug looks like a client that never decided anything.
+                recorded.append({"unreadable": True, "problem": problem, "raw": entry})
+                continue
+            recorded.append(accepted)
+        cycle.gate_decisions = recorded[-MAX_GATE_DECISIONS:]
+    for field in ("parked_question", "parked_phase", "parked_plan"):
+        if field in updates:
+            setattr(cycle, field, updates[field])
+    if body.status is ImproveCycleStatus.PARKED and cycle.parked_at is None:
+        cycle.parked_at = utcnow()
     if "change_class" in updates or "change_evidence" in updates:
         # The class decides who may publish, so it is not taken on the
         # reporter's word. The evidence it sent is re-read here: a report that
@@ -403,6 +432,40 @@ async def update_cycle(
     # caller reports the stages of one cycle in sequence.
     await session.commit()
     return response
+
+
+def _accept_gate_decision(entry: dict) -> tuple[dict | None, str | None]:
+    """Validate one reported gate decision, or say why it could not be read.
+
+    The rationale is required for the reason the type requires it: a route with
+    no stated reason cannot be reviewed, and an unreviewable decision is how an
+    invented stop criterion survives.
+    """
+    route = normalize_route(entry.get("route"))
+    if route is None:
+        return None, f"{str(entry.get('route'))[:40]!r} is not a route"
+    try:
+        decision = GateDecision(
+            phase=str(entry.get("phase") or ""),
+            route=route,
+            trigger=str(entry.get("trigger") or "")[:300],
+            rationale=str(entry.get("rationale") or ""),
+            verdict=_optional_text(entry.get("verdict"), 32),
+            change_class=_optional_text(entry.get("change_class"), 16),
+            recommends=_optional_text(entry.get("recommends"), 500),
+            decided_by=_optional_text(entry.get("decided_by"), 100),
+            at=_optional_text(entry.get("at"), 40) or utcnow().isoformat(),
+        )
+    except ValueError as exc:
+        return None, str(exc)[:200]
+    return decision.as_dict(), None
+
+
+def _optional_text(value: object, limit: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()[:limit]
+    return text or None
 
 
 #: Which rules in a report's own evidence force a class, whatever it claimed.
@@ -562,6 +625,106 @@ async def refresh_program_code(
     await session.flush()
     await session.refresh(automation)
     response = AutomationResponse.model_validate(automation)
+    await session.commit()
+    return response
+
+
+@router.get("/parked")
+async def list_parked_cycles(
+    limit: int = 20,
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session),
+) -> CycleListResponse:
+    """Everything waiting for a person, across every program in the org.
+
+    Its own route rather than a filter on one program's history, because the
+    question is never "which of this program's cycles are parked" -- it is
+    "what is waiting on me", and an answer that needs the reader to know which
+    program to look in is not an answer.
+    """
+    limit = max(1, min(limit, 100))
+    rows = (
+        (
+            await session.execute(
+                select(AutomationImproveCycle)
+                .where(
+                    AutomationImproveCycle.org_id == user.org_id,
+                    AutomationImproveCycle.status == ImproveCycleStatus.PARKED,
+                )
+                .order_by(AutomationImproveCycle.parked_at.desc())
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return CycleListResponse(
+        cycles=[CycleResponse.of(row) for row in rows],
+        total=len(rows),
+    )
+
+
+@router.post("/cycles/{cycle_id}/resolve")
+async def resolve_cycle(
+    cycle_id: uuid.UUID,
+    body: ResolveCycleRequest,
+    user: AuthenticatedUser = Depends(_require_manage_automations),
+    session: AsyncSession = Depends(get_session),
+) -> CycleResponse:
+    """Answer what a parked cycle is waiting for, so it can carry on.
+
+    A parked cycle is not a failed cycle: the work is intact on its branch and
+    the cycle holds the phase it stopped at. Resolving records the answer and
+    returns the cycle to that phase, so the next run continues it rather than
+    rediscovering it.
+
+    Requires ``manage_automations``, and deliberately so. This is the endpoint
+    a breaking change waits at, and the whole point of escalating is that the
+    thing being gated is not the thing that answers.
+    """
+    cycle = await _load_cycle(session, cycle_id, user)
+    if cycle.status is not ImproveCycleStatus.PARKED:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=(
+                f"Cycle is {cycle.status.value}, not PARKED; there is nothing "
+                "waiting to be answered"
+            ),
+        )
+    cycle.resolution = body.resolution
+    cycle.resolved_at = utcnow()
+    decision = GateDecision(
+        phase=cycle.parked_phase or "publish",
+        route=body.route,
+        trigger="a person answered the parked question",
+        rationale=body.resolution,
+        change_class=cycle.change_class,
+        decided_by=f"user:{user.user_id}",
+        at=cycle.resolved_at.isoformat(),
+    )
+    cycle.gate_decisions = [*(cycle.gate_decisions or []), decision.as_dict()][
+        -MAX_GATE_DECISIONS:
+    ]
+    # `archive` is the one route that ends here: the person has said no, and
+    # recording that as COMPLETED with the verdict is more honest than a
+    # FAILED row, which reads as something having gone wrong.
+    if body.route == "archive":
+        cycle.status = ImproveCycleStatus.COMPLETED
+        cycle.verdict = ImproveVerdict.REJECTED
+        cycle.completed_at = cycle.resolved_at
+    else:
+        # Back to the phase it stopped at. The run that picks it up resumes
+        # from there; until then it is visibly in flight again rather than
+        # sitting in a queue nobody is watching.
+        cycle.status = (
+            ImproveCycleStatus.REVIEWING
+            if cycle.parked_phase in ("review", "judge", "publish")
+            else ImproveCycleStatus.BUILDING
+        )
+    cycle.updated_at = utcnow()
+    await session.flush()
+    await session.refresh(cycle)
+    response = CycleResponse.of(cycle)
     await session.commit()
     return response
 

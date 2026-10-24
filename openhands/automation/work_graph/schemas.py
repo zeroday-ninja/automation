@@ -72,6 +72,10 @@ class WorkNodeStatus(StrEnum):
     IN_FLIGHT = "in_flight"
     DONE = "done"
     FAILED = "failed"
+    #: Waiting for a person. Distinct from IN_FLIGHT because nothing is
+    #: working on it, and distinct from FAILED because nothing went wrong:
+    #: the client polls on the first and colours the second red.
+    WAITING = "waiting"
     #: Closed by the janitor. An absence of evidence, not a verdict.
     ABANDONED = "abandoned"
     #: The row is gone; this node stands in its place.

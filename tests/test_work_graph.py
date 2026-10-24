@@ -329,3 +329,68 @@ async def test_a_builder_that_switched_runtime_says_so_on_its_own_node(
         for hop in builder["attrs"]["runtime_switches"]
     ] == [("claude-code", "codex", "usage_limit")]
     assert nodes[f"cycle:{cycle.id}"]["attrs"]["runtime_switches"]
+
+
+@pytest.mark.asyncio
+async def test_parked_work_is_waiting_rather_than_in_flight_or_failed(
+    async_client, async_session
+):
+    # Arrange
+    automation = await _program(async_session)
+    run = await _run(async_session, automation)
+    cycle = await _cycle(
+        async_session,
+        automation,
+        run,
+        status=ImproveCycleStatus.PARKED,
+        verdict=None,
+        change_class="breaking",
+        parked_question="Publish now, or wait for the client release?",
+    )
+    await async_session.commit()
+
+    # Act
+    response = await async_client.get(GRAPH)
+
+    # Assert: nothing is working on it, so the client must not poll on it;
+    # and nothing went wrong, so it must not read as a failure. A reader who
+    # can see that work is parked but not what it is parked on cannot act.
+    assert response.status_code == 200, response.text
+    body = response.json()
+    node = next(n for n in body["nodes"] if n["key"] == f"cycle:{cycle.id}")
+    assert node["status"] == "waiting"
+    assert node["attrs"]["parked_question"].startswith("Publish now")
+    assert body["in_flight"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_parked_cycle_is_not_reaped_however_long_it_waits(
+    async_session, async_session_factory
+):
+    # Arrange: a cycle waiting for a person, whose run ended long ago --
+    # which is by design, and is exactly the shape the reaper reads as
+    # abandoned.
+    automation = await _program(async_session)
+    run = await _run(async_session, automation, status=AutomationRunStatus.COMPLETED)
+    cycle = await _cycle(
+        async_session,
+        automation,
+        run,
+        status=ImproveCycleStatus.PARKED,
+        verdict=None,
+        parked_phase="publish",
+        parked_question="Publish now, or wait for the client release?",
+        parked_at=datetime.now(UTC) - timedelta(days=9),
+        updated_at=datetime.now(UTC) - timedelta(days=9),
+    )
+    await async_session.commit()
+
+    # Act
+    reaped = await reap_abandoned_cycles(async_session_factory)
+
+    # Assert: reaping it would discard the work and close the question, which
+    # is the opposite of escalating.
+    assert reaped == 0
+    await async_session.refresh(cycle)
+    assert cycle.status is ImproveCycleStatus.PARKED
+    assert cycle.reaped is False
