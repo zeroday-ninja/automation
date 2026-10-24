@@ -1166,6 +1166,14 @@ class AutomationImproveCycle(Base):
     # Builder stage: which profile did the work and where to read it.
     builder_profile_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     builder_runtime: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Every runtime this cycle's builder ran on, and why it moved. A
+    # conversation can change runtime underneath itself when the SDK fails
+    # over, so ``builder_runtime`` is corrected to the one that actually
+    # produced the work and the route is kept here: the conversation that
+    # holds the switch events is deleted with its sandbox.
+    runtime_switches: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSON, nullable=True
+    )
     builder_conversation_id: Mapped[str | None] = mapped_column(
         String(64), nullable=True
     )

@@ -216,6 +216,7 @@ def build_graph(
                     "followups": cycle.followups or [],
                     "prompt_digest": cycle.prompt_digest,
                     "verdict_rule_version": cycle.verdict_rule_version,
+                    "runtime_switches": cycle.runtime_switches or [],
                     "reaped": cycle.reaped,
                     "error": cycle.error,
                 },
@@ -302,6 +303,14 @@ def build_graph(
                     {
                         "role": "builder",
                         "runtime": cycle.builder_runtime,
+                        # The runtimes this builder moved through, oldest
+                        # first, with the reason for each hop. Carried on the
+                        # node rather than drawn as an edge because the node
+                        # key is the conversation id and every hop shared one
+                        # conversation: a second node would either collide
+                        # with this one or claim a transcript that cannot be
+                        # read apart from it.
+                        "runtime_switches": cycle.runtime_switches or [],
                         "conversation_id": cycle.builder_conversation_id,
                     },
                 )

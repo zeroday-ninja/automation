@@ -289,3 +289,43 @@ async def test_a_cycle_whose_run_was_pruned_is_reaped_only_once_it_is_old(
     await async_session.refresh(old)
     assert recent.reaped is False
     assert old.reaped is True
+
+
+@pytest.mark.asyncio
+async def test_a_builder_that_switched_runtime_says_so_on_its_own_node(
+    async_client, async_session
+):
+    # Arrange: the cycle began on claude-code, which ran out, and codex
+    # finished the change.
+    automation = await _program(async_session)
+    run = await _run(async_session, automation)
+    cycle = await _cycle(
+        async_session,
+        automation,
+        run,
+        builder_runtime="codex",
+        runtime_switches=[
+            {
+                "from": "claude-code",
+                "to": "codex",
+                "reason": "usage_limit",
+                "at": "2026-10-24T08:00:00+00:00",
+            }
+        ],
+    )
+    await async_session.commit()
+
+    # Act
+    response = await async_client.get(GRAPH)
+
+    # Assert: one agent node, because one conversation served both runtimes,
+    # and it carries the route rather than hiding the hop.
+    assert response.status_code == 200, response.text
+    nodes = {node["key"]: node for node in response.json()["nodes"]}
+    builder = nodes["agent:conv-builder"]
+    assert builder["attrs"]["runtime"] == "codex"
+    assert [
+        (hop["from"], hop["to"], hop["reason"])
+        for hop in builder["attrs"]["runtime_switches"]
+    ] == [("claude-code", "codex", "usage_limit")]
+    assert nodes[f"cycle:{cycle.id}"]["attrs"]["runtime_switches"]

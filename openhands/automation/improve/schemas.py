@@ -222,6 +222,16 @@ class UpdateCycleRequest(BaseModel):
             "indistinguishable from a restart."
         ),
     )
+    runtime_switches: list[dict[str, Any]] | None = Field(
+        default=None,
+        max_length=20,
+        description=(
+            "Every runtime this cycle's builder moved to, and why. A "
+            "conversation changes runtime underneath itself when the SDK "
+            "fails over, so `builder_runtime` is the runtime that actually "
+            "produced the work and this is the route it took to get there."
+        ),
+    )
     runtime_observations: list[dict[str, Any]] | None = Field(
         default=None,
         max_length=20,
@@ -266,6 +276,7 @@ class CycleResponse(BaseModel):
     repository: CycleRepository
     builder_profile_id: uuid.UUID | None
     builder_runtime: str | None
+    runtime_switches: list[dict[str, Any]] | None = None
     builder_conversation_id: str | None
     summary: str | None
     branch: str | None
@@ -307,6 +318,7 @@ class CycleResponse(BaseModel):
             ),
             builder_profile_id=cycle.builder_profile_id,
             builder_runtime=cycle.builder_runtime,
+            runtime_switches=cycle.runtime_switches,
             builder_conversation_id=cycle.builder_conversation_id,
             summary=cycle.summary,
             branch=cycle.branch,

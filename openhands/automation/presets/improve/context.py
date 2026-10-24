@@ -423,3 +423,146 @@ def resume_section(resume: dict | None) -> str:
             lines += [f"- {item}" for item in items]
             lines += [""]
     return "\n".join(lines)
+
+
+#: Error codes the SDK raises when an ACP runtime refuses for usage reasons.
+#:
+#: Typed, so this is the signal to prefer over ``USAGE_LIMIT_MARKERS``: the
+#: markers read a sentence an agent wrote, these read what the runtime
+#: actually reported.
+USAGE_LIMIT_CODES = ("ACPUsageLimit", "ACPUsageLimitChainExhausted")
+
+#: Longest a runtime's own words are kept on a switch or an observation.
+MAX_EVIDENCE_CHARS = 500
+
+
+def _evidence(value: object) -> str | None:
+    """A runtime's own words, bounded, or ``None`` when it said nothing."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    return text[:MAX_EVIDENCE_CHARS]
+
+
+def trace_runtime(
+    events: list[dict] | None,
+    *,
+    started_on: str | None,
+    finished: bool,
+    conversation_id: str | None,
+    observed_at: str,
+) -> dict:
+    """What actually ran, read from a conversation's own typed events.
+
+    A conversation can change runtime underneath itself: the SDK fails over on
+    a usage limit and keeps going, so the profile's runtime is what the cycle
+    *began* on and not necessarily what produced the work. Until this was
+    read, a cycle built by the fallback was still recorded against the runtime
+    that ran out, which makes both the audit trail and any share-of-work
+    measurement wrong in the same direction.
+
+    ``events`` is the conversation's events, oldest first, as the agent server
+    serialises them; ``None`` means they could not be read, which is reported
+    as a degraded trace rather than as an absence of switches.
+
+    Returns the route, the runtime that ended up running, the switches worth
+    auditing, and the ledger observations they imply.
+    """
+    route: list[str] = [started_on] if started_on else []
+    switches: list[dict] = []
+    observations: list[dict] = []
+    degraded: str | None = None
+
+    if events is None:
+        degraded = "the conversation's events could not be read"
+        events = []
+
+    exhausted: set[str] = set()
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("kind")
+        if kind == "ACPRuntimeSwitchEvent":
+            came_from = str(event.get("from_server") or "") or (
+                route[-1] if route else ""
+            )
+            went_to = str(event.get("to_server") or "")
+            if not went_to:
+                continue
+            reason = str(event.get("reason") or "")
+            raw_hint = event.get("reset_hint")
+            hint = raw_hint if isinstance(raw_hint, dict) else {}
+            switches.append(
+                {
+                    "from": came_from,
+                    "to": went_to,
+                    "model": event.get("to_model"),
+                    "reason": reason or "unknown",
+                    "at": event.get("timestamp") or observed_at,
+                    "detail": _evidence(event.get("detail")),
+                }
+            )
+            if not route or route[-1] != came_from:
+                route.append(came_from)
+            route.append(went_to)
+            # A runtime abandoned mid-conversation is the honest meaning of
+            # "nearly out": it refused, and only this hop proves it.
+            if reason == "usage_limit" and came_from:
+                exhausted.add(came_from)
+                observations.append(
+                    {
+                        "runtime": came_from,
+                        "outcome": "failed_over_from",
+                        "observed_at": event.get("timestamp") or observed_at,
+                        "reset_at": hint.get("at"),
+                        "reset_source": hint.get("source"),
+                        "evidence": _evidence(event.get("detail")),
+                        "conversation_id": conversation_id,
+                    }
+                )
+        elif kind == "ConversationErrorEvent" and event.get("code") in (
+            USAGE_LIMIT_CODES
+        ):
+            # The runtime live when the chain gave up. Every earlier one
+            # already has its own `failed_over_from`.
+            refused = route[-1] if route else (started_on or "")
+            if refused and refused not in exhausted:
+                exhausted.add(refused)
+                observations.append(
+                    {
+                        "runtime": refused,
+                        "outcome": "exhausted",
+                        "observed_at": event.get("timestamp") or observed_at,
+                        "evidence": _evidence(event.get("detail")),
+                        "conversation_id": conversation_id,
+                    }
+                )
+
+    ran = route[-1] if route else started_on
+    # Only the runtime that finished earns an `ok`: a success clears an
+    # exhaustion, and clearing it for one that was abandoned would undo the
+    # observation recorded two lines above.
+    #
+    # A degraded trace earns none at all. The conversation succeeded, but with
+    # the events unreadable there is no telling whether it switched, so an
+    # `ok` here could clear a real exhaustion on a runtime that in fact ran
+    # out -- asserting the one thing that was not observed.
+    if finished and ran and ran not in exhausted and degraded is None:
+        observations.append(
+            {
+                "runtime": ran,
+                "outcome": "ok",
+                "observed_at": observed_at,
+                "conversation_id": conversation_id,
+            }
+        )
+
+    return {
+        "route": route,
+        "ran": ran,
+        "switches": switches,
+        "observations": observations,
+        "degraded": degraded,
+    }
