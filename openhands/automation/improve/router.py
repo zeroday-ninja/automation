@@ -17,10 +17,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import AuthenticatedUser, require_permission
+from openhands.automation.config import get_config
 from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.improve.config import ImproveProgramConfig
 from openhands.automation.improve.rotation import (
+    AllRepositoriesCappedError,
+    DailyCeilingReachedError,
     NoRepositoriesError,
     RotationRepository,
     claim_next_cycle,
@@ -170,13 +173,50 @@ async def claim_cycle(
             )
 
     try:
+        sandbox_cfg = get_config().sandbox
         cycle, repositories = await claim_next_cycle(
-            session, automation, config, body.run_id
+            session,
+            automation,
+            config,
+            body.run_id,
+            # The stricter of the two, so a program can tighten its own
+            # allowance but never widen it.
+            daily_cap=min(
+                config.daily_cycles_per_repository
+                or sandbox_cfg.improve_daily_cycles_per_repository,
+                sandbox_cfg.improve_daily_cycles_per_repository,
+            ),
+            daily_ceiling=sandbox_cfg.improve_global_daily_ceiling,
         )
     except NoRepositoriesError as exc:
         # 409, not 500: the program is configured, there is simply nothing in
         # its rotation yet. The run reports this as a clean no-op.
-        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"code": "no_repositories", "message": str(exc)},
+        ) from exc
+    except AllRepositoriesCappedError as exc:
+        # Also a clean no-op, and a *different* one. Collapsing "nothing is
+        # configured", "everything is done for today" and "every runtime is
+        # out" into one prose conflict leaves the only visible result as
+        # nothing happening, with no way to tell which it was.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "all_repositories_capped",
+                "message": str(exc),
+                "resumes_at": exc.resumes_at.isoformat(),
+            },
+        ) from exc
+    except DailyCeilingReachedError as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "daily_ceiling_reached",
+                "message": str(exc),
+                "resumes_at": exc.resumes_at.isoformat(),
+            },
+        ) from exc
 
     response = ClaimCycleResponse(
         cycle=CycleResponse.of(cycle),

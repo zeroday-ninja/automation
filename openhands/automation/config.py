@@ -224,6 +224,15 @@ class SandboxSettings(BaseSettings):
         AUTOMATION_RATE_LIMIT_MAX_RETRIES: Max retries (default: 5)
     """
 
+    #: Cycles one repository may take in a day, when a program does not
+    #: override it. The brake that stops continuous improvement turning into
+    #: thirteen cycles on one repository before anyone notices.
+    improve_daily_cycles_per_repository: int = 10
+    #: Cycles the whole organization may take in a day, whatever its programs
+    #: are configured to do. Independent on purpose: a mis-edited program
+    #: should not be able to talk its way past the ceiling.
+    improve_global_daily_ceiling: int = 40
+
     default_run_duration: int = 10 * 60  # 10 minutes
     max_run_duration: int = 30 * 60  # 30 minutes
     # Watchdog-deadline slack: covers the in-sandbox post-conversation tail

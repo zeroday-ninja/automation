@@ -12,11 +12,18 @@ took last time, instead of jumping wherever a bare index happens to land.
 
 import logging
 import uuid
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.git_sync.config_override import effective_settings_for
+from openhands.automation.improve.caps import (
+    DEFAULT_DAILY_CYCLES_PER_REPOSITORY,
+    cycles_today,
+    cycles_today_for_org,
+    next_day_boundary,
+)
 from openhands.automation.improve.config import ImproveProgramConfig
 from openhands.automation.improve.url import strip_credentials
 from openhands.automation.models import (
@@ -192,21 +199,103 @@ def next_index(
     return previous.repo_index % len(repositories)
 
 
+def _automation_timezone(automation: Automation) -> str | None:
+    """The zone the program's own schedule is expressed in.
+
+    The cap resets when the program's day does, not when UTC's does, so a
+    nightly program and its allowance stay in step.
+    """
+    trigger = automation.trigger
+    if isinstance(trigger, dict):
+        value = trigger.get("timezone")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+class AllRepositoriesCappedError(Exception):
+    """Every repository has taken its allowance for today."""
+
+    def __init__(self, resumes_at: datetime) -> None:
+        super().__init__("every repository has reached its daily cap")
+        self.resumes_at = resumes_at
+
+
+class DailyCeilingReachedError(Exception):
+    """The organization has taken as much work as it allows in a day."""
+
+    def __init__(self, resumes_at: datetime) -> None:
+        super().__init__("the daily ceiling for this organization is reached")
+        self.resumes_at = resumes_at
+
+
+async def next_available_index(
+    session: AsyncSession,
+    automation: Automation,
+    repositories: list[RotationRepository],
+    previous: AutomationImproveCycle | None,
+    *,
+    daily_cap: int,
+    timezone_name: str | None,
+) -> int:
+    """Where the rotation goes next, skipping repositories done for today.
+
+    A bounded scan from wherever the rotation already was. Skipping rather
+    than blocking, because one busy repository must not stall the others — and
+    skipping needs no new state, since the cursor is derived from whichever
+    repository was actually taken.
+    """
+    start = next_index(repositories, previous)
+    for offset in range(len(repositories)):
+        candidate = repositories[(start + offset) % len(repositories)]
+        taken = await cycles_today(
+            session,
+            automation.org_id,
+            remote_id=candidate.remote_id,
+            label=candidate.label,
+            timezone_name=timezone_name,
+        )
+        if taken < daily_cap:
+            return (start + offset) % len(repositories)
+    raise AllRepositoriesCappedError(next_day_boundary(timezone_name))
+
+
 async def claim_next_cycle(
     session: AsyncSession,
     automation: Automation,
     config: ImproveProgramConfig,
     run_id: uuid.UUID | None,
+    *,
+    daily_cap: int = DEFAULT_DAILY_CYCLES_PER_REPOSITORY,
+    daily_ceiling: int | None = None,
 ) -> tuple[AutomationImproveCycle, list[RotationRepository]]:
     """Take the next repository in the rotation and record the cycle.
 
     The cycle row is written before any agent starts, so an interrupted run is
     still visible in the history and still advances the rotation. The caller
     locks the automation row first, which serializes two runs that overlap.
+
+    Both brakes are applied here, before anything is spent: a per-repository
+    allowance, and a ceiling for the whole organization that no program's
+    configuration can talk its way past.
     """
     repositories = await resolve_rotation(session, automation.org_id, config)
     previous = await latest_cycle(session, automation.id)
-    index = next_index(repositories, previous)
+    timezone_name = _automation_timezone(automation)
+
+    if daily_ceiling is not None:
+        taken = await cycles_today_for_org(session, automation.org_id, timezone_name)
+        if taken >= daily_ceiling:
+            raise DailyCeilingReachedError(next_day_boundary(timezone_name))
+
+    index = await next_available_index(
+        session,
+        automation,
+        repositories,
+        previous,
+        daily_cap=daily_cap,
+        timezone_name=timezone_name,
+    )
     chosen = repositories[index]
 
     cycle = AutomationImproveCycle(
