@@ -1637,6 +1637,65 @@ class TestTheHandoffIsVisible:
         by_id = {c["id"]: c for c in history.json()["cycles"]}
         assert by_id[first]["resumed_by_cycle_id"] == second["id"]
 
+    async def test_work_abandoned_to_a_timeout_is_resumed_like_any_other(
+        self, async_client
+    ):
+        """A builder can stop mid-change for want of time as well as quota.
+
+        Only a usage limit used to be handed over; a run that exceeded its
+        time re-raised, and the branch it had already committed to was left
+        for nobody — which is exactly the discarded work the handoff exists to
+        prevent. The reason differs, what happens next does not.
+        """
+        # Arrange
+        await add_remote(async_client, "https://github.com/acme/gamma", "gamma")
+        program = await create_program(async_client)
+        first = (await claim(async_client, program["id"])).json()["cycle"]["id"]
+        await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{first}",
+            json={
+                "status": "FAILED",
+                "builder_runtime": "claude-code",
+                "error": "claude-code ran out of time mid-change.",
+                "handoff": {**self.FALLBACK, "reason": "timed_out"},
+            },
+        )
+
+        # Act
+        claimed = await claim(async_client, program["id"])
+
+        # Assert
+        assert claimed.status_code == 201, claimed.text
+        assert claimed.json()["cycle"]["resumed_from_cycle_id"] == first
+        assert claimed.json()["resume"]["reason"] == "timed_out"
+
+    async def test_a_timeout_does_not_report_the_runtime_as_spent(self, async_client):
+        # Running out of time says nothing about a runtime's remaining quota.
+        # Recording it as exhausted would park a healthy runtime and send the
+        # next cycle to a different one for no reason.
+        await add_remote(async_client, "https://github.com/acme/delta", "delta")
+        program = await create_program(async_client)
+        cycle_id = (await claim(async_client, program["id"])).json()["cycle"]["id"]
+
+        await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "status": "FAILED",
+                "builder_runtime": "claude-code",
+                "handoff": {**self.FALLBACK, "reason": "timed_out"},
+                "runtime_observations": [],
+            },
+        )
+        usage = await async_client.get("/api/automation/v1/improve/runtime-usage")
+
+        assert usage.status_code == 200, usage.text
+        spent = [
+            entry["runtime"]
+            for entry in usage.json()["runtimes"]
+            if not entry["available"]
+        ]
+        assert spent == []
+
 
 class TestTheReviewRecordThePresetSends:
     """The review the runner builds must be the review the service accepts.

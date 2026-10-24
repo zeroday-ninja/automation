@@ -662,6 +662,11 @@ class HandoffResume(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     from_cycle_id: uuid.UUID
+    #: Why the previous cycle stopped. Two answers so far, and they call for
+    #: different things from whoever continues: a runtime out of quota left
+    #: off wherever it happened to be, while one out of time was attempting
+    #: more than fits in a cycle and the next attempt should be smaller.
+    reason: str | None = None
     branch: str | None = None
     head_sha: str | None = None
     stage: str | None = None

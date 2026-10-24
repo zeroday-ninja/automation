@@ -386,6 +386,31 @@ def looks_exhausted(text: str | None) -> bool:
     return any(marker in lowered for marker in USAGE_LIMIT_MARKERS)
 
 
+def ran_out_of_time(error: BaseException | None) -> bool:
+    """Whether this failure is a run that exceeded its time, not one that broke.
+
+    Typed first. The SDK wraps the real exception as `original_exception`, so
+    a timeout is a `TimeoutError` somewhere in the chain rather than a phrase
+    to match — unlike a usage limit, which arrives only as a runtime's own
+    prose. The wording is a fallback for a server that did not carry the
+    chain, and the cost of being wrong either way is a handoff that was or was
+    not written, never a wrong verdict.
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, TimeoutError):
+            return True
+        if "timed out after" in str(error).casefold():
+            return True
+        error = (
+            getattr(error, "original_exception", None)
+            or error.__cause__
+            or error.__context__
+        )
+    return False
+
+
 def resume_section(resume: dict | None) -> str:
     """What a cycle continuing someone else's work is told.
 
@@ -396,11 +421,22 @@ def resume_section(resume: dict | None) -> str:
     """
     if not isinstance(resume, dict) or not resume:
         return ""
+    # Why it stopped is an instruction, not trivia. A runtime out of quota
+    # left off wherever it happened to be and this cycle simply carries on; a
+    # cycle out of *time* was attempting more than fits, and continuing at the
+    # same size is how the next one runs out too.
+    why = (
+        "ran out of time before it could publish. Continue it rather than "
+        "starting again — and take a smaller piece than it did, because the "
+        "size of the attempt is what ran it out"
+        if resume.get("reason") == "timed_out"
+        else "ran out of runtime before it could publish. Continue it rather "
+        "than starting again"
+    )
     lines = [
         "## You are continuing unfinished work",
         "",
-        "A previous cycle on this repository ran out of runtime before it "
-        "could publish. Continue it rather than starting again.",
+        f"A previous cycle on this repository {why}.",
         "",
     ]
     if resume.get("goal"):

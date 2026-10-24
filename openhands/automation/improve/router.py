@@ -206,6 +206,7 @@ async def _resume_for(
         return None
     return HandoffResume(
         from_cycle_id=cycle.resumed_from_cycle_id,
+        reason=stored.get("reason"),
         branch=stored.get("branch"),
         head_sha=stored.get("head_sha"),
         stage=stored.get("stage"),
