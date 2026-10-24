@@ -1161,6 +1161,7 @@ def _load_improve_preset_files() -> dict[str, str]:
             "reviewer_prompt.md": (
                 IMPROVE_PRESET_DIR / "reviewer_prompt.md"
             ).read_text(),
+            "handoff_prompt.md": (IMPROVE_PRESET_DIR / "handoff_prompt.md").read_text(),
         }
     return _IMPROVE_PRESET_CACHE
 
@@ -1181,6 +1182,7 @@ def _generate_improve_tarball() -> bytes:
         _add_file_to_tar(tar, "context.py", preset_files["context.py"])
         _add_file_to_tar(tar, "builder_prompt.md", preset_files["builder_prompt.md"])
         _add_file_to_tar(tar, "reviewer_prompt.md", preset_files["reviewer_prompt.md"])
+        _add_file_to_tar(tar, "handoff_prompt.md", preset_files["handoff_prompt.md"])
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
 
     tarball_buffer.seek(0)

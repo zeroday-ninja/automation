@@ -25,6 +25,7 @@ pieces specific to this preset are:
 """
 
 import os
+from datetime import datetime, timezone
 import sys
 import time
 import uuid
@@ -121,8 +122,11 @@ from openhands.workspace import OpenHandsCloudWorkspace  # noqa: E402
 # report parsing lives in a module that can be imported without side effects.
 from context import (  # noqa: E402
     fetch_identity_set,
+    looks_exhausted,
+    resume_section,
     git_commit_range,
     identity_sections,
+    branch_is_pushed,
     normalize_checks,
     project_identity_sections,
     prompt_digest,
@@ -411,6 +415,71 @@ else:
     )
 
 
+def _now_iso() -> str:
+    """This moment, as the service's schemas expect it."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def write_handoff(
+    workspace,
+    repo_path: str,
+    *,
+    branch: str,
+    base_ref: str,
+    builder_id,
+    builder_runtime: str,
+    cycle_dir: str,
+    repo_label: str,
+) -> dict | None:
+    """Spend what is left of a runtime recording where it got to.
+
+    Asks the runtime that just refused, because it is the only thing that
+    knows what it was doing — and if it has nothing left to answer with, this
+    script writes a degraded record from git on its own. A branch with work on
+    it that nobody knows about is the outcome worth avoiding, and a record
+    built from `git rev-parse` costs no tokens at all.
+    """
+    try:
+        prompt = render(
+            load_template("handoff_prompt.md"), {"BRANCH": branch}
+        )
+        run_conversation(
+            workspace, builder_id, prompt, f"Hand off {repo_label}"
+        )
+    except Exception as exc:  # noqa: BLE001 - nothing here may fail the cycle
+        print(f"  the runtime could not write its own handoff: {exc}")
+
+    written = read_json_report(os.path.join(cycle_dir, "handoff.json")) or {}
+    shas = git_commit_range(repo_path, base_ref, branch)
+    pushed = branch_is_pushed(repo_path, branch)
+    if written.get("next_steps"):
+        written.setdefault("branch", branch)
+        written["branch_pushed"] = pushed
+        written.setdefault("head_sha", shas.get("head_sha"))
+        written.setdefault("status", "incomplete")
+        written.setdefault("reason", "runtime_exhausted")
+        return written
+
+    # Nothing readable. A record built from git alone still tells the next
+    # cycle where to look, which is the whole point.
+    return {
+        "status": "incomplete",
+        "reason": "runtime_exhausted",
+        "branch": branch,
+        "branch_pushed": pushed,
+        "head_sha": shas.get("head_sha"),
+        "stage": "unknown",
+        "goal": "",
+        "done": [],
+        "next_steps": [
+            "Read the branch diff and continue from it. The previous runtime "
+            "ran out before it could describe where it had got to."
+        ],
+        "do_not": [],
+        "files_touched": [],
+    }
+
+
 def execute_cycle(workspace) -> None:
     """Run one cycle to completion.
 
@@ -507,7 +576,21 @@ def execute_cycle(workspace) -> None:
 
         branch_prefix = config.get("branch_prefix") or "improve/"
         branch = f"{branch_prefix}{time.strftime('%Y%m%d-%H%M%S')}"
+        # Continuing someone else's work means continuing it on their branch.
+        # A fresh branch would leave their commits behind and produce a second
+        # change that does the same thing.
+        resume = claim.get("resume") if isinstance(claim, dict) else None
+        if isinstance(resume, dict) and resume.get("branch_pushed", True):
+            resumed_branch = resume.get("branch")
+            if isinstance(resumed_branch, str) and resumed_branch:
+                branch = resumed_branch
+                print(f"  continuing {branch} from cycle {resume.get('from_cycle_id')}")
         base_ref = f"origin/{repo_ref}" if repo_ref else "origin/HEAD"
+
+        # What this run saw about each runtime's remaining usage. The
+        # runtimes expose no balance, so this list is the only way the
+        # scheduler ever learns which subscriptions are spent.
+        observations: list[dict] = []
 
         # --- Resolve the runtimes taking part ------------------------------
         print("\n=== RUNTIMES ===")
@@ -554,6 +637,7 @@ def execute_cycle(workspace) -> None:
                 "SOUL_SECTION": soul_section,
                 "IDENTITY_SECTION": identity_section,
                 "FOCUS_SECTION": focus_section,
+                "RESUME_SECTION": resume_section(resume),
                 "MAX_CHANGED_FILES": str(config.get("max_changed_files") or 20),
                 "BRANCH": branch,
                 "BRANCH_PREFIX": branch_prefix,
@@ -567,12 +651,54 @@ def execute_cycle(workspace) -> None:
                 ),
             },
         )
-        builder_conversation_id = run_conversation(
-            workspace,
-            builder_id,
-            builder_prompt,
-            f"Improve {repo_label}",
-        )
+        try:
+            builder_conversation_id = run_conversation(
+                workspace,
+                builder_id,
+                builder_prompt,
+                f"Improve {repo_label}",
+            )
+        except ConversationFailed as failure:
+            # The one failure worth handling differently. A runtime that ran
+            # out mid-change has done real work on a branch; throwing it away
+            # means the next cycle pays to rediscover it. So what is left of
+            # this runtime — or, if nothing is left, this script on its own —
+            # writes down where it got to.
+            if not looks_exhausted(str(failure.cause)):
+                raise
+            print("  the builder's runtime is out of usage; handing off")
+            observations.append(
+                {
+                    "runtime": builder_runtime,
+                    "outcome": "exhausted",
+                    "observed_at": _now_iso(),
+                    "evidence": str(failure.cause)[:500],
+                    "conversation_id": failure.conversation_id,
+                }
+            )
+            handoff = write_handoff(
+                workspace,
+                repo_path,
+                branch=branch,
+                base_ref=base_ref,
+                builder_id=builder_id,
+                builder_runtime=builder_runtime,
+                cycle_dir=cycle_dir,
+                repo_label=repo_label,
+            )
+            report_cycle(
+                {
+                    "status": "FAILED",
+                    "error": (
+                        f"{builder_runtime} ran out of usage mid-change. Its "
+                        "work is handed to the next cycle."
+                    ),
+                    "handoff": handoff,
+                    "runtime_observations": observations,
+                }
+            )
+            report_phase(f"{repo_label}: runtime out of usage, work handed over")
+            return
 
         report = read_json_report(report_path) or {}
         if not report:

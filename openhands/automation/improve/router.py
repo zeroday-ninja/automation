@@ -11,6 +11,8 @@ Two kinds of caller share it:
 
 import logging
 import uuid
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import func, select
@@ -21,6 +23,7 @@ from openhands.automation.config import get_config
 from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.improve.config import ImproveProgramConfig
+from openhands.automation.improve.handoff import parse_handoff
 from openhands.automation.improve.rotation import (
     AllRepositoriesCappedError,
     DailyCeilingReachedError,
@@ -37,8 +40,13 @@ from openhands.automation.improve.schemas import (
     CycleListResponse,
     CycleRepository,
     CycleResponse,
+    HandoffResume,
     RotationResponse,
     UpdateCycleRequest,
+)
+from openhands.automation.improve.usage import (
+    RuntimeObservation,
+    record_observations,
 )
 from openhands.automation.models import (
     Automation,
@@ -138,6 +146,55 @@ def _rotation_entries(
     ]
 
 
+def _parse_instant(value: Any) -> datetime | None:
+    """An instant from whatever a run sent, or ``None``.
+
+    Unreadable rather than invalid: a run that reports a time this service
+    cannot parse has still reported the exhaustion, and losing that because
+    of a format is worse than losing the time.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _observed_at(value: Any) -> datetime:
+    """When something was seen, defaulting to now."""
+    return _parse_instant(value) or datetime.now(UTC)
+
+
+async def _resume_for(
+    session: AsyncSession, cycle: AutomationImproveCycle
+) -> HandoffResume | None:
+    """Unfinished work this cycle was handed, if any.
+
+    Read from the cycle the claim already pointed at, so the run is told what
+    to continue without having to go looking for a branch by name.
+    """
+    if cycle.resumed_from_cycle_id is None:
+        return None
+    previous = await session.get(AutomationImproveCycle, cycle.resumed_from_cycle_id)
+    stored = previous.handoff if previous is not None else None
+    if not isinstance(stored, dict):
+        return None
+    return HandoffResume(
+        from_cycle_id=cycle.resumed_from_cycle_id,
+        branch=stored.get("branch"),
+        head_sha=stored.get("head_sha"),
+        stage=stored.get("stage"),
+        goal=stored.get("goal"),
+        done=stored.get("done") or [],
+        next_steps=stored.get("next_steps") or [],
+        do_not=stored.get("do_not") or [],
+        files_touched=stored.get("files_touched") or [],
+        written_by=stored.get("written_by"),
+    )
+
+
 @router.post("/{automation_id}/claim", status_code=status.HTTP_201_CREATED)
 async def claim_cycle(
     automation_id: uuid.UUID,
@@ -222,6 +279,7 @@ async def claim_cycle(
         cycle=CycleResponse.of(cycle),
         config=config,
         rotation=_rotation_entries(repositories),
+        resume=await _resume_for(session, cycle),
     )
     # Commit before answering. `get_session` commits only *after* the response
     # is sent, and the caller is a run that reports against this cycle id as
@@ -277,6 +335,30 @@ async def update_cycle(
             setattr(cycle, field, updates[field])
     if "checks" in updates and body.checks is not None:
         cycle.checks = [check.model_dump(mode="json") for check in body.checks]
+    if "handoff" in updates and body.handoff is not None:
+        parsed = parse_handoff(body.handoff, written_by=cycle.builder_runtime)
+        # A handoff with no next step is indistinguishable from a restart, so
+        # one without is treated as absent rather than stored and half-
+        # trusted by whatever picks it up.
+        cycle.handoff = parsed.as_dict() if parsed is not None else None
+    if "runtime_observations" in updates and body.runtime_observations:
+        await record_observations(
+            session,
+            cycle.org_id,
+            [
+                RuntimeObservation(
+                    runtime=str(entry.get("runtime") or ""),
+                    outcome=str(entry.get("outcome") or ""),
+                    observed_at=_observed_at(entry.get("observed_at")),
+                    reset_at=_parse_instant(entry.get("reset_at")),
+                    reset_source=entry.get("reset_source"),
+                    evidence=entry.get("evidence"),
+                    conversation_id=entry.get("conversation_id"),
+                )
+                for entry in body.runtime_observations
+                if isinstance(entry, dict) and entry.get("runtime")
+            ],
+        )
     if "sources" in updates and body.sources is not None:
         cycle.sources = [source.model_dump(mode="json") for source in body.sources]
     if "reviews" in updates and body.reviews is not None:
