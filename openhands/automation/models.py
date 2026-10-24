@@ -1217,6 +1217,16 @@ class AutomationImproveCycle(Base):
     followups: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     risks: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
 
+    # Which class of change this was, computed from the diff, and what the
+    # builder said it was. Both, because the class decides who may publish and
+    # a claim that understates it is itself a finding.
+    change_class: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    claimed_change_class: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    #: The rules that fired and the lines they fired on. A class with no
+    #: evidence cannot be disagreed with, and the branch it was read from does
+    #: not outlive the sandbox.
+    change_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
     # Which prompt produced this. The digest rather than the text: the
     # rendered prompt embeds the user's identity and the repository's, which
     # is not something to store by default.

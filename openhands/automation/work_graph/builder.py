@@ -217,6 +217,10 @@ def build_graph(
                     "prompt_digest": cycle.prompt_digest,
                     "verdict_rule_version": cycle.verdict_rule_version,
                     "runtime_switches": cycle.runtime_switches or [],
+                    # Who was allowed to publish this, and on what evidence.
+                    "change_class": cycle.change_class,
+                    "claimed_change_class": cycle.claimed_change_class,
+                    "change_evidence": cycle.change_evidence or {},
                     "reaped": cycle.reaped,
                     "error": cycle.error,
                 },

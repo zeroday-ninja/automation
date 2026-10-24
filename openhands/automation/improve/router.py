@@ -22,6 +22,10 @@ from openhands.automation.auth import AuthenticatedUser, require_permission
 from openhands.automation.config import get_config
 from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
+from openhands.automation.improve.change_class import (
+    CHANGE_CLASSES,
+    normalize_change_class,
+)
 from openhands.automation.improve.config import ImproveProgramConfig
 from openhands.automation.improve.handoff import parse_handoff
 from openhands.automation.improve.rotation import (
@@ -335,6 +339,7 @@ async def update_cycle(
         # again here with whatever ran, which is the only one an audit or a
         # share-of-work measurement can use.
         "runtime_switches",
+        "claimed_change_class",
     ):
         if field in updates:
             setattr(cycle, field, updates[field])
@@ -346,6 +351,17 @@ async def update_cycle(
         # one without is treated as absent rather than stored and half-
         # trusted by whatever picks it up.
         cycle.handoff = parsed.as_dict() if parsed is not None else None
+    if "change_class" in updates or "change_evidence" in updates:
+        # The class decides who may publish, so it is not taken on the
+        # reporter's word. The evidence it sent is re-read here: a report that
+        # says "additive" while also reporting a removed export or a deleted
+        # file has contradicted itself, and the service keeps the restrictive
+        # reading. This is not a substitute for computing the class from the
+        # diff -- it is the floor under a client that is wrong or lying.
+        cycle.change_evidence = body.change_evidence
+        cycle.change_class = _floor_change_class(
+            body.change_class, body.change_evidence
+        )
     if "runtime_observations" in updates and body.runtime_observations:
         await record_observations(
             session,
@@ -387,6 +403,39 @@ async def update_cycle(
     # caller reports the stages of one cycle in sequence.
     await session.commit()
     return response
+
+
+#: Which rules in a report's own evidence force a class, whatever it claimed.
+#: Enforcement belongs here rather than in a prompt or in the sandbox: a
+#: boundary that decides who may publish is not something the thing being
+#: gated gets to decide.
+_RULE_FLOOR: dict[str, str] = {
+    "removed_export": "breaking",
+    "contract_line_removed": "breaking",
+    "route_removed": "breaking",
+    "migration_drops_data": "breaking",
+    "dependency_major_bump": "breaking",
+    "file_deleted": "deleting",
+    "deletions_above_threshold": "deleting",
+    "file_renamed": "deleting",
+}
+
+
+def _floor_change_class(
+    reported: str | None, evidence: dict[str, Any] | None
+) -> str | None:
+    """The reported class, raised to whatever its own evidence requires."""
+    classes = [normalize_change_class(reported)]
+    reasons = (evidence or {}).get("reasons")
+    if isinstance(reasons, list):
+        for reason in reasons:
+            if not isinstance(reason, dict):
+                continue
+            classes.append(_RULE_FLOOR.get(str(reason.get("rule"))))
+    known = [value for value in classes if value in CHANGE_CLASSES]
+    if not known:
+        return normalize_change_class(reported)
+    return max(known, key=CHANGE_CLASSES.index)
 
 
 @router.put("/{automation_id}/config")
