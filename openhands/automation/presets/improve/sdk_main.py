@@ -128,6 +128,7 @@ from routing import GateDecision, route_for  # noqa: E402
 from context import (  # noqa: E402
     fetch_identity_set,
     looks_exhausted,
+    ran_out_of_time,
     resume_section,
     git_commit_range,
     identity_sections,
@@ -721,6 +722,8 @@ def write_handoff(
     builder_id,
     cycle_dir: str,
     repo_label: str,
+    reason: str = "runtime_exhausted",
+    ask_runtime: bool = True,
 ) -> dict | None:
     """Spend what is left of a runtime recording where it got to.
 
@@ -733,12 +736,18 @@ def write_handoff(
     script writes a degraded record from git on its own. A branch with work on
     it that nobody knows about is the outcome worth avoiding, and a record
     built from `git rev-parse` costs no tokens at all.
+
+    `ask_runtime` is off for a builder that ran out of *time* rather than out
+    of usage. That one is still working as far as the server is concerned, so
+    asking it to describe itself waits out another whole timeout before
+    answering nothing. Git alone is the better trade there.
     """
-    try:
-        prompt = render(load_template("handoff_prompt.md"), {"BRANCH": branch})
-        run_conversation(workspace, builder_id, prompt, f"Hand off {repo_label}")
-    except Exception as exc:  # noqa: BLE001 - nothing here may fail the cycle
-        print(f"  the runtime could not write its own handoff: {exc}")
+    if ask_runtime:
+        try:
+            prompt = render(load_template("handoff_prompt.md"), {"BRANCH": branch})
+            run_conversation(workspace, builder_id, prompt, f"Hand off {repo_label}")
+        except Exception as exc:  # noqa: BLE001 - nothing here may fail the cycle
+            print(f"  the runtime could not write its own handoff: {exc}")
 
     written = read_json_report(os.path.join(cycle_dir, "handoff.json")) or {}
     shas = git_commit_range(repo_path, base_ref, branch)
@@ -748,14 +757,14 @@ def write_handoff(
         written["branch_pushed"] = pushed
         written.setdefault("head_sha", shas.get("head_sha"))
         written.setdefault("status", "incomplete")
-        written.setdefault("reason", "runtime_exhausted")
+        written.setdefault("reason", reason)
         return written
 
     # Nothing readable. A record built from git alone still tells the next
     # cycle where to look, which is the whole point.
     return {
         "status": "incomplete",
-        "reason": "runtime_exhausted",
+        "reason": reason,
         "branch": branch,
         "branch_pushed": pushed,
         "head_sha": shas.get("head_sha"),
@@ -763,8 +772,15 @@ def write_handoff(
         "goal": "",
         "done": [],
         "next_steps": [
-            "Read the branch diff and continue from it. The previous runtime "
-            "ran out before it could describe where it had got to."
+            "Read the branch diff and continue from it. "
+            + (
+                "The previous runtime ran out of time before it could "
+                "describe where it had got to, so the diff is the only "
+                "account of it."
+                if reason == "timed_out"
+                else "The previous runtime ran out before it could describe "
+                "where it had got to."
+            )
         ],
         "do_not": [],
         "files_touched": [],
@@ -974,14 +990,19 @@ def execute_cycle(workspace) -> None:
                 f"Improve {repo_label}",
             )
         except ConversationFailed as failure:
-            # The one failure worth handling differently. A runtime that ran
-            # out mid-change has done real work on a branch; throwing it away
-            # means the next cycle pays to rediscover it. So what is left of
-            # this runtime — or, if nothing is left, this script on its own —
-            # writes down where it got to.
-            if not looks_exhausted(str(failure.cause)):
+            # Two failures worth handling differently, for the same reason: a
+            # builder that stopped mid-change has done real work on a branch,
+            # and throwing it away means the next cycle pays to rediscover it.
+            # So what is left of this runtime — or, if nothing is, this script
+            # on its own — writes down where it got to.
+            exhausted = looks_exhausted(str(failure.cause))
+            out_of_time = not exhausted and ran_out_of_time(failure.cause)
+            if not exhausted and not out_of_time:
                 raise
-            print("  the builder's runtime is out of usage; handing off")
+            if out_of_time:
+                print("  the builder ran out of time; handing off from git")
+            else:
+                print("  the builder's runtime is out of usage; handing off")
             trace = runtime_trace(
                 workspace,
                 failure.conversation_id,
@@ -991,9 +1012,11 @@ def execute_cycle(workspace) -> None:
             # The conversation's own events say which runtime refused; the
             # exception string is the fallback for a server too old to emit
             # the typed events, and for a failure that never reached one.
-            if trace["observations"]:
-                observations.extend(trace["observations"])
-            else:
+            observations.extend(trace["observations"])
+            if not trace["observations"] and exhausted:
+                # Only for a usage limit. A builder that ran out of time says
+                # nothing about that runtime's remaining quota, and recording
+                # it as spent would park a runtime that is perfectly healthy.
                 observations.append(
                     {
                         "runtime": trace["ran"] or builder_runtime,
@@ -1015,13 +1038,21 @@ def execute_cycle(workspace) -> None:
                 builder_id=builder_id,
                 cycle_dir=cycle_dir,
                 repo_label=repo_label,
+                reason="timed_out" if out_of_time else "runtime_exhausted",
+                # A builder that ran out of time is, as far as the server is
+                # concerned, still working: asking it to describe itself
+                # waits out another whole timeout before answering nothing.
+                ask_runtime=not out_of_time,
             )
             report_cycle(
                 {
                     "status": "FAILED",
                     "error": (
-                        f"{builder_runtime} ran out of usage mid-change. Its "
+                        f"{builder_runtime} ran out of time mid-change. Its "
                         "work is handed to the next cycle."
+                        if out_of_time
+                        else f"{builder_runtime} ran out of usage mid-change. "
+                        "Its work is handed to the next cycle."
                     ),
                     "handoff": handoff,
                     "builder_runtime": builder_runtime,
@@ -1029,7 +1060,11 @@ def execute_cycle(workspace) -> None:
                     "runtime_observations": observations,
                 }
             )
-            report_phase(f"{repo_label}: runtime out of usage, work handed over")
+            report_phase(
+                f"{repo_label}: builder out of time, work handed over"
+                if out_of_time
+                else f"{repo_label}: runtime out of usage, work handed over"
+            )
             return
 
         # Read before the report, because a cycle that switched runtime

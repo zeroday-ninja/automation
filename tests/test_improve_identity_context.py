@@ -255,6 +255,50 @@ def test_a_refusal_for_usage_is_told_apart_from_an_ordinary_failure(
     assert preset.looks_exhausted(None) is False
 
 
+def test_a_builder_that_ran_out_of_time_is_told_apart_from_one_that_broke(
+    preset,
+) -> None:
+    """A timeout means work on a branch, which must not be thrown away.
+
+    A usage limit arrives only as a runtime's own prose, so that one is
+    matched on wording. A timeout is a real `TimeoutError` the SDK wraps as
+    `original_exception`, so it is read from the chain — matching the sentence
+    would break the moment the SDK rewords it.
+    """
+
+    # Arrange: the shape the SDK raises, and failures that are not timeouts.
+    class RunError(RuntimeError):
+        def __init__(self, original: BaseException) -> None:
+            super().__init__("Conversation run failed for id=abc")
+            self.original_exception = original
+
+    wrapped = RunError(TimeoutError("Run timed out after 3600.0 seconds."))
+
+    # Act / Assert
+    assert preset.ran_out_of_time(wrapped) is True
+    assert preset.ran_out_of_time(TimeoutError("nope")) is True
+    assert preset.ran_out_of_time(RuntimeError("connection reset by peer")) is False
+    assert preset.ran_out_of_time(None) is False
+
+
+def test_a_timeout_is_still_recognised_without_the_exception_chain(preset) -> None:
+    # A server too old to carry `original_exception` leaves only the sentence.
+    # Being wrong here costs a handoff that was or was not written, never a
+    # wrong verdict, so the wording is worth keeping as a fallback.
+    assert (
+        preset.ran_out_of_time(RuntimeError("Run timed out after 60 seconds")) is True
+    )
+
+
+def test_a_cycle_of_wrapped_failures_does_not_hang_the_check(preset) -> None:
+    # An exception chained to itself is a real shape in retry wrappers, and a
+    # walk with no seen-set would spin forever inside a failure handler.
+    looping = RuntimeError("outer")
+    looping.__cause__ = looping
+
+    assert preset.ran_out_of_time(looping) is False
+
+
 def test_rejected_approaches_are_stated_as_instructions_not_history(
     preset,
 ) -> None:
@@ -275,6 +319,27 @@ def test_rejected_approaches_are_stated_as_instructions_not_history(
     # down.
     assert section.index("Do NOT repeat") < section.index("Next steps")
     assert "the GIL serialised them" in section
+
+
+def test_a_cycle_resuming_a_timeout_is_told_to_take_less(preset) -> None:
+    """Why the last one stopped changes what this one should attempt.
+
+    A runtime out of quota left off wherever it happened to be and this cycle
+    simply carries on. A cycle out of *time* was attempting more than fits,
+    and continuing at the same size is how the next one runs out too.
+    """
+    # Arrange
+    timed_out = {"reason": "timed_out", "next_steps": ["Finish the migration."]}
+    exhausted = {"reason": "runtime_exhausted", "next_steps": ["Finish it."]}
+
+    # Act
+    after_timeout = preset.resume_section(timed_out)
+    after_limit = preset.resume_section(exhausted)
+
+    # Assert
+    assert "ran out of time" in after_timeout
+    assert "smaller piece" in after_timeout
+    assert "smaller piece" not in after_limit
 
 
 def test_a_cycle_with_nothing_to_continue_is_told_nothing(preset) -> None:
