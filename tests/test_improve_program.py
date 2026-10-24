@@ -9,6 +9,7 @@ what the dashboard promises is what the next run actually takes.
 
 import uuid
 from dataclasses import replace
+from typing import ClassVar
 
 import pytest
 from sqlalchemy import select
@@ -1404,3 +1405,85 @@ class TestCorrectionsBecomeLessons:
         assert (await async_client.get(self.LESSONS)).json()["lessons"] == []
         all_of_them = await async_client.get(f"{self.LESSONS}?include_retired=true")
         assert len(all_of_them.json()["lessons"]) == 1
+
+
+class TestTheHandoffIsVisible:
+    """A handoff that no client can read is a handoff nobody acts on.
+
+    The columns, the request field and the resume pointer all landed before
+    the response did, so a cycle could be handed over and resumed from with
+    every client seeing an ordinary failure. That is the one bug shape this
+    whole feature cannot survive: it looks exactly like the feature not
+    working.
+    """
+
+    FALLBACK: ClassVar[dict] = {
+        "status": "incomplete",
+        "reason": "runtime_exhausted",
+        "branch": "improve/20261024",
+        "branch_pushed": False,
+        "stage": "unknown",
+        "goal": "",
+        "done": [],
+        "next_steps": ["Read the branch diff and continue from it."],
+        "do_not": [],
+        "files_touched": [],
+    }
+
+    async def test_a_stored_handoff_comes_back_in_the_response(self, async_client):
+        # Arrange
+        await add_remote(async_client, "https://github.com/acme/alpha", "alpha")
+        program = await create_program(async_client)
+        cycle_id = (await claim(async_client, program["id"])).json()["cycle"]["id"]
+
+        # Act: exactly what the preset sends when nothing was left to write
+        # the handoff itself.
+        response = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "status": "FAILED",
+                "builder_runtime": "claude-code",
+                "error": "claude-code ran out of usage mid-change.",
+                "handoff": self.FALLBACK,
+            },
+        )
+
+        # Assert
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["handoff"] is not None
+        assert body["handoff"]["next_steps"] == self.FALLBACK["next_steps"]
+        assert body["handoff"]["reason"] == "runtime_exhausted"
+
+    async def test_the_next_cycle_says_which_one_it_continues(self, async_client):
+        # Arrange: one cycle hands over.
+        await add_remote(async_client, "https://github.com/acme/beta", "beta")
+        program = await create_program(async_client)
+        first = (await claim(async_client, program["id"])).json()["cycle"]["id"]
+        await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{first}",
+            json={
+                "status": "FAILED",
+                "builder_runtime": "claude-code",
+                "handoff": self.FALLBACK,
+            },
+        )
+
+        # Act
+        claimed = await claim(async_client, program["id"])
+
+        # Assert: the chain reads in both directions, which is what lets a
+        # reader see a handed-over cycle as a chain rather than as two
+        # unrelated failures that happen to share a branch.
+        assert claimed.status_code == 201, claimed.text
+        second = claimed.json()["cycle"]
+        assert second["resumed_from_cycle_id"] == first
+        resume = claimed.json()["resume"]
+        assert resume is not None
+        assert resume["next_steps"] == self.FALLBACK["next_steps"]
+
+        history = await async_client.get(
+            f"/api/automation/v1/improve/{program['id']}/cycles"
+        )
+        by_id = {c["id"]: c for c in history.json()["cycles"]}
+        assert by_id[first]["resumed_by_cycle_id"] == second["id"]
