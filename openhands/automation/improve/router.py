@@ -703,6 +703,7 @@ async def get_runtime_usage(
 @router.get("/builder-share")
 async def get_builder_share(
     days: int = 7,
+    automation_id: uuid.UUID | None = None,
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> BuilderShareResponse:
@@ -721,14 +722,34 @@ async def get_builder_share(
     history is "not yet", not a result, and `within_target` is null rather
     than false while that is true: an unmet measure and an unmeasurable one
     are different answers.
+
+    ``automation_id`` scopes it to one program, and is how to read the
+    question the plan actually asks. Unscoped, the answer covers every program
+    in the org -- disabled ones, and any test harness -- which is the right
+    answer to "what has this machine been running" and the wrong one to "is
+    this program's rotation working".
+
+    Scoped, "even" is measured against the runtimes the program is
+    *configured* to rotate, not only the ones that appear. A program set to
+    rotate three and quietly using two would otherwise read as a perfect
+    split, which is the exact failure the rotation exists to fix, scored as a
+    pass.
     """
     window = max(1, min(days, 365))
-    shares, since, covered = await builder_share(session, user.org_id, days=window)
-    gap = evenness_gap(shares)
+    expected: int | None = None
+    if automation_id is not None:
+        _, config = await _load_program(session, automation_id, user)
+        expected = len({config.builder_profile_id, *config.rotate_builder})
+    shares, since, covered = await builder_share(
+        session, user.org_id, days=window, automation_id=automation_id
+    )
+    gap = evenness_gap(shares, expected_runtimes=expected)
     within = None
     if covered >= window and gap is not None:
         within = gap <= 20.0
     return BuilderShareResponse(
+        automation_id=automation_id,
+        configured_builders=expected,
         window_days=window,
         since=since,
         days_covered=covered,

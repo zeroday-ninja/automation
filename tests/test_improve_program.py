@@ -37,6 +37,7 @@ PRESET = "/api/automation/v1/preset/improve"
 REMOTES = "/api/automation/v1/git-sync/remotes"
 BUILDER = "0a1b2c3d-0000-4000-8000-00000000b111"
 REVIEWER = "0a1b2c3d-0000-4000-8000-00000000c222"
+THIRD_BUILDER = "0a1b2c3d-0000-4000-8000-00000000d333"
 CRON = {"type": "cron", "schedule": "0 3 * * *", "timezone": "UTC"}
 
 
@@ -287,6 +288,68 @@ class TestTheBuilderShare:
         assert body["within_target"] is None
         # The measurement is still reported; only the verdict is withheld.
         assert body["evenness_gap"] == 0.0
+
+    async def test_one_programs_rotation_is_not_measured_by_the_whole_machine(
+        self, async_client, async_session
+    ):
+        # Unscoped, the answer sweeps in disabled programs and test harnesses.
+        # That is the right answer to "what has this machine been running" and
+        # the wrong one to "is this program's rotation working".
+        mine = await create_program(async_client)
+        other = await create_program(async_client)
+        for runtime in ("claude-code", "codex"):
+            await self._cycle_built_by(async_session, mine["id"], runtime, days_ago=1.0)
+        for _ in range(8):
+            await self._cycle_built_by(
+                async_session, other["id"], "claude-code", days_ago=1.0
+            )
+        await async_session.commit()
+
+        everything = await async_client.get(
+            "/api/automation/v1/improve/builder-share?days=7"
+        )
+        scoped = await async_client.get(
+            f"/api/automation/v1/improve/builder-share?days=7&automation_id={mine['id']}"
+        )
+
+        assert everything.json()["cycles"] == 10
+        assert scoped.json()["cycles"] == 2
+        assert scoped.json()["automation_id"] == mine["id"]
+        assert {r["runtime"] for r in scoped.json()["runtimes"]} == {
+            "claude-code",
+            "codex",
+        }
+
+    async def test_a_configured_runtime_that_never_builds_widens_the_gap(
+        self, async_client, async_session
+    ):
+        """Even between two is not even when three were configured.
+
+        This is the failure the rotation exists to fix, and measuring against
+        only the runtimes that appear would score it as a perfect split: a
+        program set to rotate three runtimes, quietly using two of them.
+        """
+        # Arrange: three builders configured, two of them actually building.
+        program = await create_program(
+            async_client, rotate_builder=[REVIEWER, THIRD_BUILDER]
+        )
+        for runtime in ("claude-code", "codex") * 4:
+            await self._cycle_built_by(
+                async_session, program["id"], runtime, days_ago=1.0
+            )
+        await async_session.commit()
+
+        # Act
+        response = await async_client.get(
+            f"/api/automation/v1/improve/builder-share?days=7"
+            f"&automation_id={program['id']}"
+        )
+
+        # Assert: 50/50 between two, measured against an even third each, so
+        # 16.7 points out rather than the 0.0 the observed-only reading gives.
+        body = response.json()
+        assert body["configured_builders"] == 3
+        assert body["evenness_gap"] == 16.7
 
     async def test_nothing_built_is_no_measurement_rather_than_a_perfect_one(
         self, async_client

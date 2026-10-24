@@ -408,6 +408,12 @@ class BuilderShareResponse(BaseModel):
     that cannot tell the difference reports a number that means nothing.
     """
 
+    #: The program this covers, or null for every program in the org.
+    automation_id: uuid.UUID | None = None
+    #: How many runtimes the program is configured to rotate. Null when the
+    #: answer is not scoped to one program, because there is then no single
+    #: configuration to measure "even" against.
+    configured_builders: int | None = None
     window_days: int
     since: UtcDatetime
     days_covered: int
