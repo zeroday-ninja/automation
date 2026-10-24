@@ -244,3 +244,56 @@ def earliest_reset(statuses: dict[str, RuntimeStatus]) -> datetime | None:
         status.reset_at for status in statuses.values() if status.reset_at is not None
     ]
     return min(times) if times else None
+
+
+async def observed_runtimes(session: AsyncSession, org_id: uuid.UUID) -> list[str]:
+    """Every runtime this org has a ledger row for.
+
+    Needed because the ledger is only ever read against a *known* list of
+    runtimes — the ones a program is configured to use — and a reader asking
+    "what is spent" has no such list. A runtime nobody has observed has
+    nothing to report, so this is the honest set to answer about.
+    """
+    return sorted(
+        (
+            await session.execute(
+                select(AutomationRuntimeUsage.runtime).where(
+                    AutomationRuntimeUsage.org_id == org_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def last_observation_of(
+    session: AsyncSession, org_id: uuid.UUID
+) -> dict[str, dict]:
+    """What was last seen about each runtime, in its own words.
+
+    The status says *whether* a runtime is spent; this says what was seen that
+    made anyone think so. A reader deciding whether to trust an exhaustion
+    needs the evidence, not only the verdict.
+    """
+    rows = (
+        (
+            await session.execute(
+                select(AutomationRuntimeUsage).where(
+                    AutomationRuntimeUsage.org_id == org_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {
+        row.runtime: {
+            "last_observation": row.last_observation,
+            "last_exhausted_at": _utc(row.last_exhausted_at),
+            "last_success_at": _utc(row.last_success_at),
+            "consecutive_exhaustions": row.consecutive_exhaustions,
+            "reset_source": row.reset_source,
+        }
+        for row in rows
+    }

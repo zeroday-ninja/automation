@@ -54,11 +54,17 @@ from openhands.automation.improve.schemas import (
     HandoffResume,
     ResolveCycleRequest,
     RotationResponse,
+    RuntimeUsageEntry,
+    RuntimeUsageResponse,
     UpdateCycleRequest,
 )
 from openhands.automation.improve.usage import (
     RuntimeObservation,
+    earliest_reset,
+    last_observation_of,
+    observed_runtimes,
     record_observations,
+    runtime_statuses,
 )
 from openhands.automation.models import (
     Automation,
@@ -634,6 +640,47 @@ async def refresh_program_code(
     response = AutomationResponse.model_validate(automation)
     await session.commit()
     return response
+
+
+@router.get("/runtime-usage")
+async def get_runtime_usage(
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session),
+) -> RuntimeUsageResponse:
+    """Which runtimes have usage left, and what was seen that says so.
+
+    The ledger existed from the start and nothing could read it: it was
+    written by cycles and read only by the claim, against the list of
+    runtimes one program happens to be configured with. A person asking "what
+    is spent" has no such list, so this answers about every runtime that has
+    actually been observed — a runtime nobody has used has nothing to report.
+
+    Recovery is applied here, at read time, the same way the claim applies it:
+    an exhaustion whose reset has passed reads as available without anything
+    having been scheduled to flip it.
+
+    The evidence travels with the verdict. A reader deciding whether to trust
+    an exhaustion needs what was seen, not only the conclusion — and the
+    conclusion for a runtime with no rows is "unknown", not "healthy".
+    """
+    runtimes = await observed_runtimes(session, user.org_id)
+    statuses = await runtime_statuses(session, user.org_id, runtimes)
+    evidence = await last_observation_of(session, user.org_id)
+    return RuntimeUsageResponse(
+        runtimes=[
+            RuntimeUsageEntry(
+                runtime=name,
+                state=statuses[name].state.value,
+                available=statuses[name].available,
+                reset_at=statuses[name].reset_at,
+                cycles_attempted=statuses[name].cycles_attempted,
+                cycles_completed=statuses[name].cycles_completed,
+                **(evidence.get(name) or {}),
+            )
+            for name in runtimes
+        ],
+        earliest_reset=earliest_reset(statuses),
+    )
 
 
 @router.get("/parked")
