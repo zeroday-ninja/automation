@@ -1240,6 +1240,10 @@ class TestJudgingADeletion:
                 "status": "REVIEWING",
                 "builder_runtime": "claude-code",
                 "change_class": "deleting",
+                # The review comes first: a judge's signature answers "is this
+                # removal safe to make", not "is this change worth making", so
+                # a deletion the reviewers objected to is still objected to.
+                "verdict": "ACCEPTED",
                 "head_sha": "a1b2c3d",
                 "changed_files": ["openhands/legacy.py"],
                 "checks": [{"command": "pytest tests/", "passed": True}],

@@ -1,5 +1,10 @@
 """Who may publish a change, and whether its evidence is there yet.
 
+A review that objected stops a change before any of that. The class decides
+*who* may publish; the review decides whether there is anything fit to
+publish, and an additive change is not exempt from being wrong. Only an
+accepted change reaches the class rules below.
+
 Authority resolves from the change's class, which is computed from its diff, so
 nothing here is the builder's opinion of its own work:
 
@@ -108,9 +113,45 @@ def _failed_checks(checks: list | None) -> list[str]:
     ]
 
 
+#: Why each verdict other than ACCEPTED is not something to merge.
+#:
+#: Phrased as the answer a person would want: what the review concluded, and
+#: what to do about it. None of them is a failure of the cycle -- the work is
+#: on its branch either way -- so none of them is routed as one.
+UNMERGEABLE_VERDICTS: dict[str, tuple[str, str]] = {
+    "CHANGES_REQUESTED": (
+        "cycle",
+        "A reviewer asked for changes. Its concerns are on the cycle; the "
+        "change goes round again rather than landing over them.",
+    ),
+    "REJECTED": (
+        "cycle",
+        "A reviewer rejected this change. Publishing it would make the "
+        "review a formality.",
+    ),
+    "INCONCLUSIVE": (
+        "cycle",
+        "No reviewer reached a verdict, so nothing judged this change. "
+        "Publishing on that treats absence of evidence as evidence of "
+        "safety.",
+    ),
+    "SINGLE_RUNTIME": (
+        "return",
+        "No second runtime was available to review this, so it carries only "
+        "its builder's own word. It stands as a proposal; the next cycle "
+        "with a reviewer free can judge it.",
+    ),
+    "NO_CHANGE": (
+        "archive",
+        "This cycle changed nothing, so there is nothing to publish.",
+    ),
+}
+
+
 def resolve_authority(
     *,
     change_class: str | None,
+    verdict: str | None = None,
     head_sha: str | None,
     changed_files: list | None,
     checks: list | None,
@@ -146,6 +187,23 @@ def resolve_authority(
             ),
             missing=("change_class",),
         )
+
+    # Before the class rules, because the class decides who may publish and
+    # this decides whether there is anything fit to publish. An additive
+    # change publishes on its own account -- not over its reviewer's head.
+    if verdict is None:
+        return Authority(
+            authorised=False,
+            route="return",
+            reason=(
+                "No review has been recorded for this change yet. Authority "
+                "is not a thing to collect before the review that decides it."
+            ),
+            missing=("verdict",),
+        )
+    if verdict in UNMERGEABLE_VERDICTS:
+        route, reason = UNMERGEABLE_VERDICTS[verdict]
+        return Authority(authorised=False, route=route, reason=reason)
 
     failures = _failed_checks(checks)
     if failures:

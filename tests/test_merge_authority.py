@@ -1,9 +1,10 @@
 """Who may publish a change, and whether its evidence is there.
 
-Three properties matter here. A breaking change has no publishing path at all,
-for anybody. A deletion needs a signature that is not the author's. And a
-change that cannot show that its verification *ran* stands as a proposal rather
-than being merged on an assertion.
+Four properties matter here. A review that objected stops a change outright.
+A breaking change has no publishing path at all, for anybody. A deletion needs
+a signature that is not the author's. And a change that cannot show that its
+verification *ran* stands as a proposal rather than being merged on an
+assertion.
 """
 
 import pytest
@@ -15,6 +16,7 @@ from openhands.automation.improve.authority import (
 
 
 READY = {
+    "verdict": "ACCEPTED",
     "head_sha": "a1b2c3d",
     "changed_files": ["openhands/service.py"],
     "checks": [{"command": "pytest tests/", "passed": True}],
@@ -157,3 +159,85 @@ def test_each_readiness_requirement_is_named_when_it_is_missing(
 
     # Named so the answer is actionable rather than only negative.
     assert gaps == (field,)
+
+
+class TestTheReviewDecidesBeforeTheClassDoes:
+    """An additive change publishes on its own account — not over a reviewer.
+
+    This is the failure that made the rule necessary. A real cycle merged a
+    change its reviewer had asked for changes on, with a specific and correct
+    concern, because authority resolved from the diff's class and never looked
+    at what the review concluded:
+
+        review  -> cycle   | ...the new coverage guard gives false assurance...
+        publish -> approve | An additive change publishes on its own account.
+        publish -> approve | Updating 1e0ed2a..c67956b  Fast-forward
+
+    "No confirmation" in the change-risk table waives the *user's*
+    confirmation. The review is a different gate, and it was not being read.
+    """
+
+    @pytest.mark.parametrize(
+        ("verdict", "route"),
+        [
+            ("CHANGES_REQUESTED", "cycle"),
+            ("REJECTED", "cycle"),
+            ("INCONCLUSIVE", "cycle"),
+            ("SINGLE_RUNTIME", "return"),
+            ("NO_CHANGE", "archive"),
+        ],
+    )
+    def test_a_change_that_was_not_accepted_does_not_publish(
+        self, verdict: str, route: str
+    ) -> None:
+        # Arrange: everything else is perfect — additive, complete evidence.
+        ready = {**READY, "verdict": verdict}
+
+        # Act
+        authority = resolve_authority(
+            change_class="additive", judge_attestation=None, **ready
+        )
+
+        # Assert: refused, and routed somewhere rather than simply stopped.
+        assert authority.authorised is False
+        assert authority.route == route
+        assert authority.reason
+
+    def test_asking_before_any_review_is_refused_rather_than_assumed(self) -> None:
+        # The preset reports its reviews and *then* asks. A service asked
+        # first has not been told what the reviewers concluded, and answering
+        # "yes" there is how the original defect happened.
+        ready = {**READY, "verdict": None}
+
+        authority = resolve_authority(
+            change_class="additive", judge_attestation=None, **ready
+        )
+
+        assert authority.authorised is False
+        assert authority.missing == ("verdict",)
+
+    def test_a_rejected_review_outranks_a_judge_attestation(self) -> None:
+        # The signature answers "is this removal safe to make", not "is this
+        # change worth making". A deletion a reviewer rejected is still
+        # rejected.
+        authority = resolve_authority(
+            change_class="deleting",
+            judge_attestation=ATTESTED,
+            **{**READY, "verdict": "REJECTED"},
+        )
+
+        assert authority.authorised is False
+        assert authority.route == "cycle"
+
+    def test_a_breaking_change_is_still_answered_before_the_review(self) -> None:
+        # Order matters the other way here: an accepted breaking change is
+        # still never an agent's decision, and saying "your reviewer objected"
+        # would be the wrong reason to refuse it.
+        authority = resolve_authority(
+            change_class="breaking",
+            judge_attestation=ATTESTED,
+            **{**READY, "verdict": "CHANGES_REQUESTED"},
+        )
+
+        assert authority.human_only is True
+        assert authority.route == "escalate"
