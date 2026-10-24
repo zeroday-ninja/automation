@@ -110,6 +110,16 @@ class ImproveProgramConfig(BaseModel):
             "the turn's own builder is skipped rather than self-reviewing."
         ),
     )
+    judge_profile_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Agent profile that attests deletions: that each removal is dead, "
+            "replaced, or covered, naming where. A third role beside builder "
+            "and reviewers, so its runtime and model are yours to pick. "
+            "Without one, a deletion waits for a person instead of "
+            "publishing on its author's word."
+        ),
+    )
     repository_source: RepositorySource = Field(
         default="git_sync",
         description=(
@@ -240,6 +250,17 @@ class ImproveProgramConfig(BaseModel):
                 )
         if len(set(self.reviewer_profile_ids)) != len(self.reviewer_profile_ids):
             raise ValueError("reviewer_profile_ids contains a duplicate")
+        if self.judge_profile_id is not None and self.judge_profile_id in (
+            self.builder_rotation
+        ):
+            # Every profile in the rotation builds on some turn, so a judge
+            # drawn from it would eventually be signing off its own removals.
+            # The service checks the runtime that actually signed as well --
+            # this just stops the configuration from guaranteeing the clash.
+            raise ValueError(
+                "the judge cannot be a profile that also builds: a runtime "
+                "attesting its own deletions is not independent attestation"
+            )
         return self
 
     @property

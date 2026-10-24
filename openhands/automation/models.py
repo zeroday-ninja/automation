@@ -1242,6 +1242,14 @@ class AutomationImproveCycle(Base):
     # severity table would retroactively reinterpret every past verdict.
     verdict_rule_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+    #: The judge's attestation that each removal is dead, replaced, or
+    #: covered, with the runtime that signed it. The runtime is what the
+    #: service checks: a model favours its own output, so the signer must not
+    #: be the author, and a rotation moves the builder between cycles.
+    judge_attestation: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True
+    )
+
     # --- Routing -------------------------------------------------------
     # Where each gate sent the work, and why. Append-only: a verdict says
     # whether a change is good and never said what happened next, which is how

@@ -1075,3 +1075,150 @@ class TestParkingAndResolving:
         assert all(entry["unreadable"] for entry in recorded)
         assert "not a route" in recorded[0]["problem"]
         assert "rationale" in recorded[1]["problem"]
+
+
+class TestJudgingADeletion:
+    """The judge signs a removal off, and the service checks who signed."""
+
+    async def _built_deletion(self, async_client, label: str) -> str:
+        await add_remote(async_client, f"https://github.com/acme/{label}", label)
+        program = await create_program(async_client)
+        cycle_id = (await claim(async_client, program["id"])).json()["cycle"]["id"]
+        response = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "status": "REVIEWING",
+                "builder_runtime": "claude-code",
+                "change_class": "deleting",
+                "head_sha": "a1b2c3d",
+                "changed_files": ["openhands/legacy.py"],
+                "checks": [{"command": "pytest tests/", "passed": True}],
+                "summary": "Removed the unused backend resolver.",
+            },
+        )
+        assert response.status_code == 200, response.text
+        return cycle_id
+
+    async def test_the_runtime_that_built_it_cannot_attest_its_own_removals(
+        self, async_client
+    ):
+        # Arrange
+        cycle_id = await self._built_deletion(async_client, "alpha")
+
+        # Act: the configuration is not consulted; what signed is.
+        response = await async_client.post(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/attest",
+            json={
+                "attested": True,
+                "runtime": "claude-code",
+                "summary": "Looks dead to me.",
+                "removals": [
+                    {
+                        "path": "openhands/legacy.py",
+                        "finding": "dead",
+                        "where": "grep returns only the definition",
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 409
+        assert "never the author" in response.text
+
+    async def test_an_attestation_from_another_runtime_authorises_the_merge(
+        self, async_client
+    ):
+        # Arrange
+        cycle_id = await self._built_deletion(async_client, "beta")
+        before = await async_client.get(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/authority"
+        )
+        assert before.json()["authorised"] is False
+
+        # Act
+        attested = await async_client.post(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/attest",
+            json={
+                "attested": True,
+                "runtime": "codex",
+                "summary": "Nothing imports it; the replacement covers the case.",
+                "removals": [
+                    {
+                        "path": "openhands/legacy.py",
+                        "symbol": "resolve_backend",
+                        "finding": "replaced",
+                        "where": "launch/resolve.py does this now",
+                    }
+                ],
+            },
+        )
+
+        # Assert: authorised, and the signature is on the gate log.
+        assert attested.status_code == 200, attested.text
+        assert [d["route"] for d in attested.json()["gate_decisions"]] == ["approve"]
+        after = await async_client.get(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/authority"
+        )
+        assert after.json()["authorised"] is True
+        assert "codex" in after.json()["reason"]
+
+    async def test_attesting_a_set_of_removals_without_naming_them_is_refused(
+        self, async_client
+    ):
+        cycle_id = await self._built_deletion(async_client, "gamma")
+
+        response = await async_client.post(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/attest",
+            json={"attested": True, "runtime": "codex", "summary": "all fine"},
+        )
+
+        assert response.status_code == 422
+        assert "signing off nothing" in response.text
+
+    async def test_a_breaking_change_is_never_authorised_from_here(self, async_client):
+        # Arrange: complete evidence, and it still does not matter.
+        await add_remote(async_client, "https://github.com/acme/delta", "delta")
+        program = await create_program(async_client)
+        cycle_id = (await claim(async_client, program["id"])).json()["cycle"]["id"]
+        await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "builder_runtime": "claude-code",
+                "change_class": "breaking",
+                "head_sha": "a1b2c3d",
+                "changed_files": ["openhands/schemas.py"],
+                "checks": [{"command": "pytest tests/", "passed": True}],
+                "summary": "Renamed the event envelope.",
+            },
+        )
+
+        # Act
+        response = await async_client.get(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/authority"
+        )
+
+        # Assert
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["authorised"] is False
+        assert body["human_only"] is True
+        assert body["route"] == "escalate"
+
+    async def test_a_judge_that_also_builds_is_refused_in_the_config(
+        self, async_client
+    ):
+        # Every profile in a rotation builds on some turn, so a judge drawn
+        # from it would eventually sign off its own removals.
+        response = await async_client.post(
+            PRESET,
+            json={
+                "name": "Judge of its own work",
+                "trigger": CRON,
+                "improve": improve_config(
+                    rotate_builder=[REVIEWER], judge_profile_id=REVIEWER
+                ),
+            },
+        )
+
+        assert response.status_code == 422
+        assert "attesting its own deletions" in response.text

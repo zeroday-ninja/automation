@@ -22,6 +22,7 @@ from openhands.automation.auth import AuthenticatedUser, require_permission
 from openhands.automation.config import get_config
 from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
+from openhands.automation.improve.authority import resolve_authority
 from openhands.automation.improve.change_class import (
     CHANGE_CLASSES,
     normalize_change_class,
@@ -40,6 +41,8 @@ from openhands.automation.improve.rotation import (
 )
 from openhands.automation.improve.routing import GateDecision, normalize_route
 from openhands.automation.improve.schemas import (
+    AttestCycleRequest,
+    AuthorityResponse,
     ClaimCycleRequest,
     ClaimCycleResponse,
     CycleListResponse,
@@ -661,6 +664,93 @@ async def list_parked_cycles(
     return CycleListResponse(
         cycles=[CycleResponse.of(row) for row in rows],
         total=len(rows),
+    )
+
+
+@router.post("/cycles/{cycle_id}/attest")
+async def attest_cycle(
+    cycle_id: uuid.UUID,
+    body: AttestCycleRequest,
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session),
+) -> CycleResponse:
+    """Record the judge's verdict on this cycle's removals.
+
+    The service refuses an attestation from the runtime that built the change
+    rather than trusting the configuration to have kept them apart: a rotation
+    moves the builder between cycles, and a model favours its own output.
+    """
+    cycle = await _load_cycle(session, cycle_id, user)
+    if cycle.status in _TERMINAL_STATUSES:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"Cycle already {cycle.status.value.lower()}",
+        )
+    if cycle.builder_runtime and body.runtime == cycle.builder_runtime:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=(
+                f"{body.runtime} built this change, so it cannot attest its "
+                "own removals. The signer is never the author."
+            ),
+        )
+    cycle.judge_attestation = {
+        "attested": body.attested,
+        "runtime": body.runtime,
+        "summary": body.summary,
+        "removals": [removal.model_dump(mode="json") for removal in body.removals],
+        "profile_id": str(body.profile_id) if body.profile_id else None,
+        "conversation_id": body.conversation_id,
+        "at": utcnow().isoformat(),
+    }
+    decision = GateDecision(
+        phase="judge",
+        route="approve" if body.attested else "cycle",
+        trigger=f"the judge examined {len(body.removals)} removal(s)",
+        rationale=body.summary,
+        change_class=cycle.change_class,
+        decided_by=f"runtime:{body.runtime}",
+        at=cycle.judge_attestation["at"],
+    )
+    cycle.gate_decisions = [*(cycle.gate_decisions or []), decision.as_dict()][
+        -MAX_GATE_DECISIONS:
+    ]
+    cycle.updated_at = utcnow()
+    await session.flush()
+    await session.refresh(cycle)
+    response = CycleResponse.of(cycle)
+    await session.commit()
+    return response
+
+
+@router.get("/cycles/{cycle_id}/authority")
+async def get_cycle_authority(
+    cycle_id: uuid.UUID,
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session),
+) -> AuthorityResponse:
+    """Whether this change may publish now, and what is standing in the way.
+
+    Read-only and computed on demand, so it is the same answer whoever asks
+    and whenever they ask. A caller that publishes without asking is still
+    possible on a deployment where the run and the dashboard share one
+    credential -- but the answer is recorded here, which makes doing so a
+    detectable act rather than an invisible one.
+    """
+    cycle = await _load_cycle(session, cycle_id, user)
+    authority = resolve_authority(
+        change_class=cycle.change_class,
+        head_sha=cycle.head_sha,
+        changed_files=cycle.changed_files,
+        checks=cycle.checks,
+        summary=cycle.summary,
+        builder_runtime=cycle.builder_runtime,
+        judge_attestation=cycle.judge_attestation,
+    )
+    return AuthorityResponse(
+        cycle_id=cycle.id,
+        change_class=cycle.change_class,
+        **authority.as_dict(),
     )
 
 
