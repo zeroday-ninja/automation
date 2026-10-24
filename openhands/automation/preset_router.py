@@ -1160,6 +1160,9 @@ def _load_improve_preset_files() -> dict[str, str]:
             # directory: the service re-reads a reported class against the
             # same rules, so there must be exactly one copy of them. The
             # module is stdlib-only for this reason.
+            "routing.py": (
+                Path(__file__).parent / "improve" / "routing.py"
+            ).read_text(),
             "change_class.py": (
                 Path(__file__).parent / "improve" / "change_class.py"
             ).read_text(),
@@ -1169,6 +1172,7 @@ def _load_improve_preset_files() -> dict[str, str]:
                 IMPROVE_PRESET_DIR / "reviewer_prompt.md"
             ).read_text(),
             "handoff_prompt.md": (IMPROVE_PRESET_DIR / "handoff_prompt.md").read_text(),
+            "judge_prompt.md": (IMPROVE_PRESET_DIR / "judge_prompt.md").read_text(),
         }
     return _IMPROVE_PRESET_CACHE
 
@@ -1188,9 +1192,11 @@ def _generate_improve_tarball() -> bytes:
         _add_file_to_tar(tar, "report.py", preset_files["report.py"])
         _add_file_to_tar(tar, "context.py", preset_files["context.py"])
         _add_file_to_tar(tar, "change_class.py", preset_files["change_class.py"])
+        _add_file_to_tar(tar, "routing.py", preset_files["routing.py"])
         _add_file_to_tar(tar, "builder_prompt.md", preset_files["builder_prompt.md"])
         _add_file_to_tar(tar, "reviewer_prompt.md", preset_files["reviewer_prompt.md"])
         _add_file_to_tar(tar, "handoff_prompt.md", preset_files["handoff_prompt.md"])
+        _add_file_to_tar(tar, "judge_prompt.md", preset_files["judge_prompt.md"])
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
 
     tarball_buffer.seek(0)

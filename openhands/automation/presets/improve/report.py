@@ -272,3 +272,73 @@ def choose_reviewers(config: dict, profiles: dict, builder_id: str) -> list[dict
             {"id": profile_id, "name": profile.get("name"), "runtime": runtime}
         )
     return chosen
+
+
+def normalize_removals(raw: object) -> list:
+    """The judge's removals, as typed records the service will accept.
+
+    An entry with no checkable ``where`` is dropped with a note rather than
+    passed on: "it looks unused" is an assertion, and an attestation built out
+    of assertions is worse than no attestation because it reads as evidence.
+    """
+    removals = []
+    for entry in raw if isinstance(raw, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path")
+        finding = str(entry.get("finding") or "").strip().lower()
+        where = entry.get("where")
+        if not isinstance(path, str) or not path.strip():
+            continue
+        if finding not in ("dead", "replaced", "covered"):
+            print(f"  dropped a removal with finding {finding!r}: not one of three")
+            continue
+        if not isinstance(where, str) or not where.strip():
+            print(f"  dropped the removal of {path}: no checkable 'where'")
+            continue
+        symbol = entry.get("symbol")
+        removals.append(
+            {
+                "path": path.strip()[:500],
+                "symbol": symbol.strip()[:200] if isinstance(symbol, str) else None,
+                "finding": finding,
+                "where": where.strip()[:1000],
+            }
+        )
+    return removals[:200]
+
+
+def changeover_plan(report: dict, reasons: list | None, branch: str) -> dict:
+    """What a person needs in order to answer a breaking change.
+
+    Built from what the builder reported and what the diff says, not asked for
+    separately: a plan requested in a second conversation is a plan written
+    without the change in front of it. What the builder did not supply is
+    recorded as absent, because a plan with a silently empty rollback reads as
+    a plan with no rollback needed.
+    """
+    breaks = [
+        f"{entry.get('rule')} in {entry.get('path')}: {entry.get('detail')}"
+        for entry in (reasons or [])
+        if isinstance(entry, dict)
+    ][:10]
+    plan = {
+        "breaks": breaks or ["the diff could not be read"],
+        "consumers": string_list(report.get("affects"))[:20]
+        or string_list(report.get("followups"))[:20],
+        "sequence": string_list(report.get("changeover"))[:20],
+        "rollback": clamp(report.get("rollback"), 1000),
+        "branch": branch,
+    }
+    for field, absent in (
+        ("consumers", "The builder did not say who depends on this."),
+        ("sequence", "The builder proposed no changeover sequence."),
+    ):
+        if not plan[field]:
+            plan[field] = [absent]
+    if not plan["rollback"]:
+        plan["rollback"] = (
+            f"Not stated by the builder. Reverting the branch `{branch}` is "
+            "the fallback, which only works while nothing depends on it yet."
+        )
+    return plan

@@ -122,6 +122,7 @@ from openhands.workspace import OpenHandsCloudWorkspace  # noqa: E402
 # Packaged alongside main.py in the tarball; see its docstring for why the
 # report parsing lives in a module that can be imported without side effects.
 from change_class import assess_diff, claim_mismatch  # noqa: E402
+from routing import GateDecision, route_for  # noqa: E402
 from context import (  # noqa: E402
     fetch_identity_set,
     looks_exhausted,
@@ -143,6 +144,8 @@ from report import (  # noqa: E402
     cycle_verdict,
     choose_reviewers,
     clamp,
+    changeover_plan,
+    normalize_removals,
     normalize_sources,
     normalize_soul_suggestions,
     normalize_verdict,
@@ -306,6 +309,92 @@ def classify_change(repo_path: str, base_ref: str, branch: str):
         f"{len(assessment.reasons)} reason(s))"
     )
     return assessment
+
+
+def gate(
+    phase: str,
+    route: str,
+    *,
+    trigger: str,
+    rationale: str,
+    verdict: str | None = None,
+    change_class: str | None = None,
+    recommends: str | None = None,
+    decided_by: str | None = None,
+) -> dict:
+    """One routing decision, ready to report.
+
+    Built through the shared type rather than as a dict literal, so a route
+    outside the closed set or a missing rationale fails here -- in the cycle
+    that made the decision -- rather than arriving at the service as an
+    unreadable entry.
+    """
+    return GateDecision(
+        phase=phase,
+        route=route,
+        trigger=trigger,
+        rationale=rationale,
+        verdict=verdict,
+        change_class=change_class,
+        recommends=recommends,
+        decided_by=decided_by,
+        at=_now_iso(),
+    ).as_dict()
+
+
+def removals_section(assessment) -> str:
+    """The removals the judge has to account for, as the diff reported them."""
+    if assessment is None:
+        return "The diff could not be read, so no removal list was computed."
+    lines = [
+        f"- `{reason.path}`: {reason.detail}"
+        for reason in assessment.reasons
+        if reason.rule in ("removed_export", "file_deleted", "deletions_above_threshold")
+    ]
+    if assessment.removed_exports:
+        lines.append(
+            "\nNames removed: "
+            + ", ".join(f"`{name}`" for name in assessment.removed_exports)
+        )
+    return "\n".join(lines) or "No removals were computed from the diff."
+
+
+def cycle_authority(cycle_id: str) -> dict:
+    """What the service says about publishing this change.
+
+    Asked rather than decided here, because the one thing a cycle must not do
+    is work out its own permission. A failure to reach the service is reported
+    as an unauthorised answer: not knowing whether you may publish is not the
+    same as being allowed to.
+    """
+    try:
+        return cycle_request("GET", f"/v1/improve/cycles/{cycle_id}/authority")
+    except Exception as exc:
+        print(f"  WARNING: could not ask whether this may publish: {exc}")
+        return {
+            "authorised": False,
+            "route": "return",
+            "reason": f"the authority check could not be reached: {exc}",
+            "missing": ["authority"],
+            "human_only": False,
+        }
+
+
+def merge_pull_request(repo_path: str, pr_url: str) -> dict:
+    """Merge an authorised pull request, and say what happened either way."""
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "merge", pr_url, "--squash", "--delete-branch"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except Exception as exc:
+        return {"merged": False, "detail": f"{type(exc).__name__}: {exc}"[:300]}
+    if result.returncode != 0:
+        return {"merged": False, "detail": result.stderr.strip()[:300]}
+    return {"merged": True, "detail": result.stdout.strip()[:300]}
 
 
 def _no_updates_answer(error: str | None) -> str | None:
@@ -920,14 +1009,16 @@ def execute_cycle(workspace) -> None:
             return
 
         # --- Review stage ---------------------------------------------------
-        if not reviewers:
-            report_cycle({"status": "COMPLETED", "verdict": "SINGLE_RUNTIME"})
-            report_phase(f"{repo_label}: built, no second runtime to review")
-            print("\n  only one runtime available; review skipped")
-            return
-
+        # With no second runtime there is nothing to review, but the change
+        # still has to go through the publish gate: the gate reads the change
+        # class and the evidence, neither of which depends on a reviewer, and
+        # a gate some paths walk around is a gate with a hole in it.
         report_cycle({"status": "REVIEWING"})
-        print("\n=== REVIEW ===")
+        reviews = []
+        if not reviewers:
+            print("\n  only one runtime available; review skipped")
+        else:
+            print("\n=== REVIEW ===")
         reviewer_template = load_template("reviewer_prompt.md")
         sources_rendered = (
             "\n".join(
@@ -942,7 +1033,6 @@ def execute_cycle(workspace) -> None:
             or "The builder admitted no risks, which is itself a finding."
         )
 
-        reviews = []
         for position, reviewer in enumerate(reviewers, start=1):
             review_path = os.path.join(cycle_dir, f"review-{position}.json")
             review_path_told = f"{CYCLE_DIR_NAME}/review-{position}.json"
@@ -1051,10 +1141,255 @@ def execute_cycle(workspace) -> None:
             )
             print(f"  verdict: {verdict}")
 
+        verdict = cycle_verdict(reviews)
+        computed_class = assessment.change_class if assessment is not None else None
+        decisions = [
+            gate(
+                "review",
+                route_for(verdict, computed_class)[0],
+                trigger=f"{len(reviews)} review(s) on another runtime",
+                rationale=(
+                    "; ".join(
+                        clamp(review.get("summary"), 200) or "no summary"
+                        for review in reviews[:3]
+                    )
+                    or "the reviewers recorded no summary"
+                ),
+                verdict=verdict,
+                change_class=computed_class,
+            )
+        ]
+
+        # --- Judge stage ----------------------------------------------------
+        # Only for a deletion, and only with a judge configured. A removal
+        # published on its author's word is the thing this whole stage exists
+        # to prevent, so no judge means the change waits for a person rather
+        # than going ahead.
+        judge_id = config.get("judge_profile_id")
+        if computed_class == "deleting" and judge_id:
+            judge = profiles.get(str(judge_id)) or {}
+            judge_runtime = judge.get("runtime")
+            if judge_runtime and judge_runtime == builder_runtime:
+                # The service refuses this too. Caught here so the cycle does
+                # not pay for a conversation whose answer cannot be accepted.
+                decisions.append(
+                    gate(
+                        "judge",
+                        "return",
+                        trigger="the configured judge runs the builder's runtime",
+                        rationale=(
+                            f"{judge_runtime} built this change, so it cannot "
+                            "attest its own removals"
+                        ),
+                        change_class=computed_class,
+                    )
+                )
+            else:
+                report_phase(f"The judge is examining what {repo_label} removed")
+                print(f"\n=== JUDGE === {judge.get('name') or judge_id}")
+                judge_path = os.path.join(cycle_dir, "judge.json")
+                judge_prompt = render(
+                    load_template("judge_prompt.md"),
+                    {
+                        "REPO_LABEL": repo_label,
+                        "REPO_PATH": repo_dir,
+                        "BRANCH": reported_branch,
+                        "BASE_REF": base_ref,
+                        "SOUL_SECTION": soul_section,
+                        "IDENTITY_SECTION": identity_section,
+                        "BUILDER_SUMMARY": builder_summary,
+                        "REMOVALS_SECTION": removals_section(assessment),
+                        "REPORT_PATH": f"{CYCLE_DIR_NAME}/judge.json",
+                    },
+                )
+                judge_conversation_id = None
+                judge_error = None
+                try:
+                    judge_conversation_id = run_conversation(
+                        workspace,
+                        str(judge_id),
+                        judge_prompt,
+                        f"Judge removals in {repo_label}",
+                    )
+                except Exception as exc:
+                    judge_conversation_id = getattr(exc, "conversation_id", None)
+                    judge_error = f"{type(exc).__name__}: {exc}"
+                    print(f"  the judge failed (non-fatal): {judge_error}")
+
+                judge_trace = runtime_trace(
+                    workspace,
+                    judge_conversation_id,
+                    started_on=judge_runtime,
+                    finished=judge_error is None,
+                )
+                observations.extend(judge_trace["observations"])
+                judge_ran = judge_trace["ran"] or judge_runtime
+
+                verdict_report = read_json_report(judge_path) or {}
+                if not verdict_report and judge_error is None:
+                    verdict_report = (
+                        report_from_final_response(workspace, judge_conversation_id)
+                        or {}
+                    )
+                if not verdict_report:
+                    # Silence is not an attestation. Recorded as a refusal
+                    # with the reason, so the cycle reads as "nobody signed"
+                    # rather than as "the judge said no".
+                    decisions.append(
+                        gate(
+                            "judge",
+                            "return",
+                            trigger="the judge produced no readable answer",
+                            rationale=(
+                                judge_error
+                                or "no report was written and the final answer "
+                                "could not be parsed"
+                            ),
+                            change_class=computed_class,
+                            decided_by=f"runtime:{judge_ran}",
+                        )
+                    )
+                else:
+                    attestation = {
+                        "attested": bool(verdict_report.get("attested")),
+                        "runtime": judge_ran or "unknown",
+                        "summary": clamp(verdict_report.get("summary"))
+                        or "The judge recorded no reasoning.",
+                        "removals": normalize_removals(
+                            verdict_report.get("removals")
+                        ),
+                        "profile_id": str(judge_id),
+                        "conversation_id": judge_conversation_id,
+                    }
+                    if attestation["attested"] and not attestation["removals"]:
+                        # The service refuses this; downgrading here keeps the
+                        # judge's own words instead of losing the whole answer
+                        # to a 422.
+                        attestation["attested"] = False
+                        attestation["summary"] = (
+                            "Attested without naming any removal, which is "
+                            "attesting nothing. Original answer: "
+                            + attestation["summary"]
+                        )
+                    try:
+                        cycle_request(
+                            "POST",
+                            f"/v1/improve/cycles/{cycle_id}/attest",
+                            attestation,
+                        )
+                        print(
+                            f"  judge: {'attested' if attestation['attested'] else 'refused'}"
+                        )
+                    except Exception as exc:
+                        print(f"  WARNING: the attestation was refused: {exc}")
+                        decisions.append(
+                            gate(
+                                "judge",
+                                "return",
+                                trigger="the service refused the attestation",
+                                rationale=str(exc)[:500],
+                                change_class=computed_class,
+                                decided_by=f"runtime:{judge_ran}",
+                            )
+                        )
+        elif computed_class == "deleting":
+            decisions.append(
+                gate(
+                    "judge",
+                    "return",
+                    trigger="this change removes code and no judge is configured",
+                    rationale=(
+                        "A removal published on its author's word is not "
+                        "attested. Configure a judge profile, or answer this "
+                        "one yourself."
+                    ),
+                    change_class=computed_class,
+                )
+            )
+
+        # --- Publish gate ---------------------------------------------------
+        authority = cycle_authority(cycle_id)
+        decisions.append(
+            gate(
+                "publish",
+                authority.get("route") or "return",
+                trigger="asked the service whether this may publish",
+                rationale=clamp(authority.get("reason"), 1000)
+                or "the service gave no reason",
+                verdict=verdict,
+                change_class=computed_class,
+                recommends=(
+                    "merge" if authority.get("authorised") else "wait"
+                ),
+                decided_by="service",
+            )
+        )
+
+        if authority.get("human_only"):
+            # A breaking change stops here with its plan, and the work stays
+            # on the branch. Parking rather than failing is what makes the
+            # answer resumable instead of something to redo.
+            plan = changeover_plan(
+                report,
+                assessment.as_dict()["reasons"] if assessment is not None else None,
+                reported_branch,
+            )
+            report_cycle(
+                {
+                    "status": "PARKED",
+                    "verdict": verdict,
+                    "reviews": reviews,
+                    "parked_phase": "publish",
+                    "parked_question": clamp(
+                        f"{builder_summary}\n\nThis is a breaking change. "
+                        "Publish it now, or wait?",
+                        4000,
+                    ),
+                    "parked_plan": plan,
+                    "gate_decisions": decisions,
+                    "runtime_observations": observations[-MAX_OBSERVATIONS:],
+                }
+            )
+            report_phase(f"{repo_label}: waiting on you — a breaking change")
+            print("\n  parked: a breaking change is never published from here")
+            return
+
+        merged = None
+        if authority.get("authorised") and config.get("merge_when_authorised", True):
+            if pr_url:
+                report_phase(f"Merging the change to {repo_label}")
+                merged = merge_pull_request(repo_path, pr_url)
+                print(f"  merge: {'ok' if merged['merged'] else merged['detail']}")
+                decisions.append(
+                    gate(
+                        "publish",
+                        "approve" if merged["merged"] else "return",
+                        trigger="merged the authorised pull request",
+                        rationale=merged["detail"] or "no output",
+                        change_class=computed_class,
+                        decided_by="cycle",
+                    )
+                )
+            else:
+                decisions.append(
+                    gate(
+                        "publish",
+                        "approve",
+                        trigger="authorised, with no pull request to merge",
+                        rationale=(
+                            "The branch is pushed and authorised; this program "
+                            "does not open pull requests."
+                        ),
+                        change_class=computed_class,
+                        decided_by="cycle",
+                    )
+                )
+
         final_update = {
             "status": "COMPLETED",
-            "verdict": cycle_verdict(reviews),
+            "verdict": verdict,
             "reviews": reviews,
+            "gate_decisions": decisions,
             # Newest last and bounded, because the service caps the list: a
             # cycle with many reviewers must not lose the reviewer that just
             # ran out in order to re-send what the builder stage already
@@ -1068,7 +1403,10 @@ def execute_cycle(workspace) -> None:
                 soul_suggestions
             )
         report_cycle(final_update)
-        report_phase(f"{repo_label}: cycle complete")
+        report_phase(
+            f"{repo_label}: cycle complete"
+            + (" and merged" if merged and merged["merged"] else "")
+        )
     except Exception as exc:
         detail = f"{type(exc).__name__}: {exc}"
         report_cycle({"status": "FAILED", "error": detail[:MAX_SUMMARY_CHARS]})
