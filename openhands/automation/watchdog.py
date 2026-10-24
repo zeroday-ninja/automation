@@ -1033,6 +1033,14 @@ _TERMINAL_CYCLE_STATUSES: Final = (
     ImproveCycleStatus.FAILED,
 )
 
+#: Statuses the reaper leaves alone even though they are not terminal.
+#:
+#: A parked cycle is *waiting for a person*, so the run that parked it has
+#: ended by design and "nothing has reported since" is its normal state --
+#: exactly the shape the reaper reads as abandoned. Reaping one would discard
+#: the work and close the question, which is the opposite of escalating.
+_UNREAPABLE_CYCLE_STATUSES: Final = (ImproveCycleStatus.PARKED,)
+
 
 async def reap_abandoned_cycles(
     session_factory: async_sessionmaker[AsyncSession],
@@ -1083,7 +1091,9 @@ async def reap_abandoned_cycles(
                     AutomationRun.id == AutomationImproveCycle.run_id,
                 )
                 .where(
-                    AutomationImproveCycle.status.notin_(_TERMINAL_CYCLE_STATUSES),
+                    AutomationImproveCycle.status.notin_(
+                        (*_TERMINAL_CYCLE_STATUSES, *_UNREAPABLE_CYCLE_STATUSES)
+                    ),
                     AutomationImproveCycle.reaped.is_(False),
                 )
             )

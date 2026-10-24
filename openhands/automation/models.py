@@ -991,6 +991,11 @@ class ImproveCycleStatus(StrEnum):
     CLAIMED = "CLAIMED"
     BUILDING = "BUILDING"
     REVIEWING = "REVIEWING"
+    #: Waiting for a person. Deliberately not terminal and deliberately not a
+    #: failure: the work is intact on its branch, the cycle holds the phase it
+    #: stopped at, and resolving the question resumes from there. A breaking
+    #: change always ends up here, because that is never an agent's decision.
+    PARKED = "PARKED"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
@@ -1237,6 +1242,31 @@ class AutomationImproveCycle(Base):
     # severity table would retroactively reinterpret every past verdict.
     verdict_rule_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+    # --- Routing -------------------------------------------------------
+    # Where each gate sent the work, and why. Append-only: a verdict says
+    # whether a change is good and never said what happened next, which is how
+    # a changes-requested cycle came to simply stop.
+    gate_decisions: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSON, nullable=True
+    )
+
+    # --- Parked --------------------------------------------------------
+    # What this cycle is waiting for a person to answer, and where to pick it
+    # up from once they have.
+    parked_phase: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    parked_question: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: For a breaking change: what breaks, who consumes it, the sequence that
+    #: keeps both sides working, and the rollback. A breaking change with no
+    #: changeover plan is a question nobody can answer.
+    parked_plan: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    parked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    resolution: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # --- Handoff -------------------------------------------------------
     # What this cycle left for the next one when it ran out of runtime.
     #
@@ -1276,6 +1306,14 @@ class AutomationImproveCycle(Base):
         # automation. Ordering by created_at is ambiguous when two rows share a
         # timestamp, so the lookup orders by (created_at, id) and this index
         # matches it.
+        # The dashboard's one question about parked work is "what is waiting
+        # on me", across every program in the org.
+        Index(
+            "ix_automation_improve_cycle_parked",
+            "org_id",
+            "status",
+            "parked_at",
+        ),
         Index(
             "ix_automation_improve_cycle_automation_created",
             "automation_id",

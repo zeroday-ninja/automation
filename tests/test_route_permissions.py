@@ -34,6 +34,9 @@ MANAGE_ONLY_ROUTES = {
     # somebody else's program at a different repository.
     ("PUT", "/api/automation/v1/improve/{automation_id}/config"),
     ("POST", "/api/automation/v1/improve/{automation_id}/refresh-code"),
+    # Answering a parked cycle is the escalation itself: the whole point of
+    # escalating is that the thing being gated is not the thing that answers.
+    ("POST", "/api/automation/v1/improve/cycles/{cycle_id}/resolve"),
 }
 
 # Every check that require_permission() returns shares this code object.

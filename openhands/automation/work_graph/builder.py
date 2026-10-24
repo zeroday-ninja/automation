@@ -54,6 +54,7 @@ _CYCLE_STATUS: dict[ImproveCycleStatus, WorkNodeStatus] = {
     ImproveCycleStatus.CLAIMED: WorkNodeStatus.PENDING,
     ImproveCycleStatus.BUILDING: WorkNodeStatus.IN_FLIGHT,
     ImproveCycleStatus.REVIEWING: WorkNodeStatus.IN_FLIGHT,
+    ImproveCycleStatus.PARKED: WorkNodeStatus.WAITING,
     ImproveCycleStatus.COMPLETED: WorkNodeStatus.DONE,
     ImproveCycleStatus.FAILED: WorkNodeStatus.FAILED,
 }
@@ -217,6 +218,14 @@ def build_graph(
                     "prompt_digest": cycle.prompt_digest,
                     "verdict_rule_version": cycle.verdict_rule_version,
                     "runtime_switches": cycle.runtime_switches or [],
+                    # Where each gate sent the work, and what it is waiting
+                    # for if it stopped. The question has to be on the node:
+                    # a reader who can see that work is parked but not what
+                    # it is parked on cannot do anything about it.
+                    "gate_decisions": cycle.gate_decisions or [],
+                    "parked_question": cycle.parked_question,
+                    "parked_plan": cycle.parked_plan or {},
+                    "resolution": cycle.resolution,
                     # Who was allowed to publish this, and on what evidence.
                     "change_class": cycle.change_class,
                     "claimed_change_class": cycle.claimed_change_class,

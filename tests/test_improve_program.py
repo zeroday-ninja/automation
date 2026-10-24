@@ -921,3 +921,157 @@ class TestTheServiceKeepsTheRestrictiveReading:
 
         assert response.status_code == 200, response.text
         assert response.json()["change_class"] == "deleting"
+
+
+class TestParkingAndResolving:
+    """A cycle that waits for a person, and the answer that restarts it."""
+
+    async def _parked(self, async_client, label: str) -> str:
+        await add_remote(async_client, f"https://github.com/acme/{label}", label)
+        program = await create_program(async_client)
+        cycle_id = (await claim(async_client, program["id"])).json()["cycle"]["id"]
+        response = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "status": "PARKED",
+                "change_class": "breaking",
+                "branch": "improve/20261024",
+                "parked_phase": "publish",
+                "parked_question": (
+                    "This renames the conversation socket's event envelope. "
+                    "Publish now, or wait for the client release?"
+                ),
+                "parked_plan": {
+                    "breaks": ["the 1.55 TypeScript client"],
+                    "consumers": ["agent-canvas"],
+                    "sequence": ["ship both envelopes", "move the client", "drop"],
+                    "rollback": "revert the server commit; both envelopes stay",
+                },
+                "gate_decisions": [
+                    {
+                        "phase": "publish",
+                        "route": "escalate",
+                        "trigger": "the diff is a breaking change",
+                        "rationale": (
+                            "a wire contract changed, which is never mine to publish"
+                        ),
+                        "change_class": "breaking",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 200, response.text
+        return cycle_id
+
+    async def test_a_breaking_change_waits_with_its_plan_and_is_not_a_failure(
+        self, async_client
+    ):
+        # Act
+        cycle_id = await self._parked(async_client, "alpha")
+
+        # Assert: visible as waiting, across every program, with the plan the
+        # question cannot be answered without.
+        listed = await async_client.get("/api/automation/v1/improve/parked")
+        assert listed.status_code == 200, listed.text
+        parked = listed.json()["cycles"]
+        assert [c["id"] for c in parked] == [cycle_id]
+        assert parked[0]["status"] == "PARKED"
+        assert parked[0]["parked_plan"]["rollback"]
+        assert parked[0]["parked_at"]
+        assert [d["route"] for d in parked[0]["gate_decisions"]] == ["escalate"]
+
+    async def test_resolving_returns_the_cycle_to_the_phase_it_stopped_at(
+        self, async_client
+    ):
+        # Arrange
+        cycle_id = await self._parked(async_client, "beta")
+
+        # Act
+        response = await async_client.post(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/resolve",
+            json={
+                "route": "approve",
+                "resolution": "The client release is out; publish it.",
+            },
+        )
+
+        # Assert: back in flight rather than discarded, with the answer kept
+        # and both decisions on the record.
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "REVIEWING"
+        assert body["resolution"].startswith("The client release")
+        assert body["resolved_at"]
+        assert [d["route"] for d in body["gate_decisions"]] == ["escalate", "approve"]
+        assert body["gate_decisions"][-1]["decided_by"].startswith("user:")
+
+    async def test_archiving_ends_it_deliberately_rather_than_as_a_failure(
+        self, async_client
+    ):
+        # Arrange
+        cycle_id = await self._parked(async_client, "gamma")
+
+        # Act
+        response = await async_client.post(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/resolve",
+            json={"route": "archive", "resolution": "Not this quarter."},
+        )
+
+        # Assert: a decision, not a malfunction.
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "COMPLETED"
+        assert body["verdict"] == "REJECTED"
+
+    async def test_escalating_an_escalation_is_refused(self, async_client):
+        cycle_id = await self._parked(async_client, "delta")
+
+        response = await async_client.post(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/resolve",
+            json={"route": "escalate", "resolution": "Ask someone else."},
+        )
+
+        assert response.status_code == 422
+        assert "escalation is answered" in response.text
+
+    async def test_resolving_a_cycle_that_is_not_waiting_is_a_conflict(
+        self, async_client
+    ):
+        await add_remote(async_client, "https://github.com/acme/eps", "eps")
+        program = await create_program(async_client)
+        cycle_id = (await claim(async_client, program["id"])).json()["cycle"]["id"]
+
+        response = await async_client.post(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/resolve",
+            json={"route": "approve", "resolution": "nothing to answer"},
+        )
+
+        assert response.status_code == 409
+
+    async def test_a_decision_the_service_cannot_read_is_recorded_as_unreadable(
+        self, async_client
+    ):
+        # Arrange
+        await add_remote(async_client, "https://github.com/acme/zeta", "zeta")
+        program = await create_program(async_client)
+        cycle_id = (await claim(async_client, program["id"])).json()["cycle"]["id"]
+
+        # Act: a route outside the closed set, and one with no rationale.
+        response = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "gate_decisions": [
+                    {"phase": "review", "route": "merge-it", "rationale": "go on"},
+                    {"phase": "review", "route": "approve", "rationale": ""},
+                ]
+            },
+        )
+
+        # Assert: not dropped. A client with a bug must not look like a client
+        # that never decided anything.
+        assert response.status_code == 200, response.text
+        recorded = response.json()["gate_decisions"]
+        assert len(recorded) == 2
+        assert all(entry["unreadable"] for entry in recorded)
+        assert "not a route" in recorded[0]["problem"]
+        assert "rationale" in recorded[1]["problem"]

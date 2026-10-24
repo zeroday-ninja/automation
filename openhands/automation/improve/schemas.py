@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from openhands.automation.improve.config import ImproveProgramConfig
+from openhands.automation.improve.routing import ROUTES, normalize_route
 from openhands.automation.models import (
     AutomationImproveCycle,
     ImproveCycleStatus,
@@ -222,6 +223,37 @@ class UpdateCycleRequest(BaseModel):
             "indistinguishable from a restart."
         ),
     )
+    gate_decisions: list[dict[str, Any]] | None = Field(
+        default=None,
+        max_length=40,
+        description=(
+            "Where each gate sent this work and why. Appended to whatever is "
+            "already recorded, never replacing it: a routing decision that "
+            "was taken cannot be un-taken by a later report."
+        ),
+    )
+    parked_question: str | None = Field(
+        default=None,
+        max_length=4000,
+        description=(
+            "What this cycle needs a person to answer. Sending it with status "
+            "PARKED is what stops the cycle without failing it."
+        ),
+    )
+    parked_phase: str | None = Field(
+        default=None,
+        max_length=32,
+        description="The phase to resume from once the question is answered.",
+    )
+    parked_plan: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "For a breaking change: what breaks, who consumes it, the sequence "
+            "that keeps both sides working during the transition, and the "
+            "rollback. A breaking change with no changeover plan is a question "
+            "nobody can answer."
+        ),
+    )
     change_class: str | None = Field(
         default=None,
         max_length=16,
@@ -289,6 +321,48 @@ class UpdateCycleRequest(BaseModel):
         return v
 
 
+class ResolveCycleRequest(BaseModel):
+    """A person's answer to what a parked cycle is waiting for."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    route: str = Field(
+        ...,
+        description=(
+            "Where the work goes now: 'approve' to let it publish, 'cycle' to "
+            "send it back for another pass, 'return' for more evidence, or "
+            "'archive' to stop deliberately. 'escalate' is not available here "
+            "-- this *is* the escalation."
+        ),
+    )
+    resolution: str = Field(
+        ...,
+        min_length=1,
+        max_length=4000,
+        description=(
+            "Why. Required, and carried into the resuming cycle's context: an "
+            "answer with no reasoning behind it has to be guessed at again the "
+            "next time the same question comes up."
+        ),
+    )
+
+    @field_validator("route")
+    @classmethod
+    def _a_real_route_that_is_not_another_escalation(cls, value: str) -> str:
+        normalized = normalize_route(value)
+        if normalized is None:
+            raise ValueError(
+                f"{value!r} is not a route; expected one of {', '.join(ROUTES)}"
+            )
+        if normalized == "escalate":
+            raise ValueError(
+                "'escalate' is not an answer here: this endpoint is where an "
+                "escalation is answered, so escalating again would park the "
+                "cycle on the person who just unparked it"
+            )
+        return normalized
+
+
 class CycleResponse(BaseModel):
     """One recorded cycle."""
 
@@ -304,6 +378,13 @@ class CycleResponse(BaseModel):
     change_class: str | None = None
     claimed_change_class: str | None = None
     change_evidence: dict[str, Any] | None = None
+    gate_decisions: list[dict[str, Any]] | None = None
+    parked_phase: str | None = None
+    parked_question: str | None = None
+    parked_plan: dict[str, Any] | None = None
+    parked_at: UtcDatetime | None = None
+    resolution: str | None = None
+    resolved_at: UtcDatetime | None = None
     builder_conversation_id: str | None
     summary: str | None
     branch: str | None
@@ -349,6 +430,13 @@ class CycleResponse(BaseModel):
             change_class=cycle.change_class,
             claimed_change_class=cycle.claimed_change_class,
             change_evidence=cycle.change_evidence,
+            gate_decisions=cycle.gate_decisions,
+            parked_phase=cycle.parked_phase,
+            parked_question=cycle.parked_question,
+            parked_plan=cycle.parked_plan,
+            parked_at=cycle.parked_at,
+            resolution=cycle.resolution,
+            resolved_at=cycle.resolved_at,
             builder_conversation_id=cycle.builder_conversation_id,
             summary=cycle.summary,
             branch=cycle.branch,
