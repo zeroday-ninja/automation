@@ -359,3 +359,63 @@ async def test_a_program_with_a_run_in_flight_does_not_start_another(
     assert len(runs) == 1
     await async_session.refresh(automation)
     assert automation.last_triggered_at is None
+
+
+# --- the handoff, through the claim -----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_exactly_one_cycle_picks_up_a_handoff(async_session) -> None:
+    """Two overlapping runs must not both continue the same work."""
+    from openhands.automation.improve.config import ImproveProgramConfig
+    from openhands.automation.improve.rotation import claim_next_cycle
+
+    # Arrange: a program with one repository, and a cycle that left work.
+    automation = Automation(
+        id=uuid.uuid4(),
+        org_id=ORG_ID,
+        user_id=USER_ID,
+        name="Nightly improvement",
+        trigger={"type": "cron", "schedule": "0 3 * * *", "timezone": "UTC"},
+        enabled=True,
+        tarball_path="uploads/test.tar.gz",
+        entrypoint="python main.py",
+    )
+    async_session.add(automation)
+    await async_session.flush()
+    abandoned = AutomationImproveCycle(
+        id=uuid.uuid4(),
+        automation_id=automation.id,
+        org_id=ORG_ID,
+        repo_index=0,
+        repo_label="hazard",
+        repo_url="https://example.invalid/hazard",
+        status=ImproveCycleStatus.FAILED,
+        handoff={
+            "status": "incomplete",
+            "branch": "improve/20261024",
+            "branch_pushed": True,
+            "head_sha": "a1b2c3d",
+            "next_steps": ["finish the regression test"],
+        },
+    )
+    async_session.add(abandoned)
+    await async_session.flush()
+
+    config = ImproveProgramConfig(
+        builder_profile_id=uuid.uuid4(),
+        repository_source="explicit",
+        repositories=[{"url": "https://example.invalid/hazard", "label": "hazard"}],
+    )
+
+    # Act: two claims in a row, as two overlapping runs would do.
+    first, _ = await claim_next_cycle(async_session, automation, config, None)
+    second, _ = await claim_next_cycle(async_session, automation, config, None)
+    await async_session.commit()
+
+    # Assert: the first takes it and the second does not. The write that
+    # marks it taken is what makes the handoff exactly-once.
+    assert first.resumed_from_cycle_id == abandoned.id
+    assert second.resumed_from_cycle_id is None
+    await async_session.refresh(abandoned)
+    assert abandoned.resumed_by_cycle_id == first.id

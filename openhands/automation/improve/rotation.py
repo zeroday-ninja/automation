@@ -260,6 +260,43 @@ async def next_available_index(
     raise AllRepositoriesCappedError(next_day_boundary(timezone_name))
 
 
+async def _claim_handoff(
+    session: AsyncSession,
+    automation: Automation,
+    chosen: RotationRepository,
+    cycle: AutomationImproveCycle,
+) -> AutomationImproveCycle | None:
+    """The newest unfinished handoff for this repository, now taken.
+
+    Matched on the repository rather than on the program, because the work was
+    left on a branch of that repository and whoever picks it up next is the
+    right one to continue it.
+    """
+    query = (
+        select(AutomationImproveCycle)
+        .where(
+            AutomationImproveCycle.org_id == automation.org_id,
+            AutomationImproveCycle.id != cycle.id,
+            AutomationImproveCycle.resumed_by_cycle_id.is_(None),
+            AutomationImproveCycle.handoff.is_not(None),
+        )
+        .order_by(AutomationImproveCycle.created_at.desc())
+        .limit(20)
+    )
+    for candidate in (await session.execute(query)).scalars().all():
+        same_repository = (
+            candidate.remote_id == chosen.remote_id
+            if chosen.remote_id is not None
+            else candidate.repo_label == chosen.label
+        )
+        if not same_repository:
+            continue
+        stored = candidate.handoff
+        if isinstance(stored, dict) and stored.get("status") == "incomplete":
+            return candidate
+    return None
+
+
 async def claim_next_cycle(
     session: AsyncSession,
     automation: Automation,
@@ -314,6 +351,17 @@ async def claim_next_cycle(
     )
     session.add(cycle)
     await session.flush()
+
+    # Pick up where a previous cycle on this repository left off, if one left
+    # anything. Claimed inside the same transaction that chose the repository,
+    # and marked as taken: that write is what makes the handoff exactly-once,
+    # so two overlapping runs cannot both continue the same work.
+    resumed = await _claim_handoff(session, automation, chosen, cycle)
+    if resumed is not None:
+        cycle.resumed_from_cycle_id = resumed.id
+        resumed.resumed_by_cycle_id = cycle.id
+        await session.flush()
+
     logger.info(
         "Improvement cycle claimed",
         extra={

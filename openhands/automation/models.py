@@ -1219,6 +1219,20 @@ class AutomationImproveCycle(Base):
     # severity table would retroactively reinterpret every past verdict.
     verdict_rule_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+    # --- Handoff -------------------------------------------------------
+    # What this cycle left for the next one when it ran out of runtime.
+    #
+    # The structured record lives here and the prose lives on the branch: the
+    # claim needs a pointer it can follow without guessing a branch name, and
+    # the next runtime needs the reasoning with the code in front of it.
+    handoff: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    #: Bidirectional, so the history reads as a chain rather than as two
+    #: unrelated cycles that happen to share a branch.
+    resumed_from_cycle_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    resumed_by_cycle_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, nullable=True, index=True
+    )
+
     # Closed by the janitor rather than by the run that claimed it. An
     # absence of evidence, deliberately not a verdict: a reaped cycle must not
     # be coloured like a failure somebody reported.

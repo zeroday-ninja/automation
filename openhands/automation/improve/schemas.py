@@ -213,6 +213,24 @@ class UpdateCycleRequest(BaseModel):
             "the prompt embeds the user's identity and the repository's."
         ),
     )
+    handoff: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Where this cycle got to when its runtime ran out, for the next "
+            "cycle on this repository to continue from. Rejected without a "
+            "non-empty `next_steps`: a handoff with no next step is "
+            "indistinguishable from a restart."
+        ),
+    )
+    runtime_observations: list[dict[str, Any]] | None = Field(
+        default=None,
+        max_length=20,
+        description=(
+            "What this run saw about each runtime's remaining usage. The "
+            "runtimes expose no balance, so this is the only way the "
+            "scheduler learns which subscriptions are spent."
+        ),
+    )
     verdict_rule_version: str | None = Field(
         default=None,
         max_length=32,
@@ -312,6 +330,29 @@ class CycleResponse(BaseModel):
         )
 
 
+class HandoffResume(BaseModel):
+    """Unfinished work this cycle is continuing.
+
+    Present only when a previous cycle on the same repository ran out of
+    runtime mid-change and wrote down where it had got to. ``do_not`` is the
+    field that saves the most: it is what stops this cycle spending its whole
+    budget rediscovering a dead end the last one already walked into.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    from_cycle_id: uuid.UUID
+    branch: str | None = None
+    head_sha: str | None = None
+    stage: str | None = None
+    goal: str | None = None
+    done: list[str] = Field(default_factory=list)
+    next_steps: list[str] = Field(default_factory=list)
+    do_not: list[str] = Field(default_factory=list)
+    files_touched: list[str] = Field(default_factory=list)
+    written_by: str | None = None
+
+
 class ClaimCycleResponse(BaseModel):
     """What a run needs to carry out the cycle it just claimed."""
 
@@ -320,6 +361,13 @@ class ClaimCycleResponse(BaseModel):
     rotation: list[CycleRepository] = Field(
         ...,
         description="The whole rotation in order, so a run can report context.",
+    )
+    resume: HandoffResume | None = Field(
+        default=None,
+        description=(
+            "Work left unfinished by a previous cycle on this repository. "
+            "Absent when there is none, which is the usual case."
+        ),
     )
 
 

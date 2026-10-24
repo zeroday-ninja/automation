@@ -254,6 +254,28 @@ def fetch_soul(workspace) -> str | None:
     return text
 
 
+def branch_is_pushed(repo_path: str, branch: str) -> bool:
+    """Whether the branch exists on the remote.
+
+    It matters because an unpushed branch cannot be seen by the next cycle,
+    which runs in a fresh sandbox: the reasoning in a handoff still helps, but
+    the commits are gone and saying otherwise would send the next runtime
+    looking for something that is not there.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo_path, "ls-remote", "--exit-code", "origin", branch],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"  could not check whether {branch} was pushed: {exc}")
+        return False
+    return result.returncode == 0
+
+
 def prompt_digest(prompt: str) -> str:
     """A fingerprint of the rendered prompt.
 
@@ -334,3 +356,70 @@ def git_commit_range(repo_path: str, base_ref: str, branch: str) -> dict:
             continue
         shas[field] = result.stdout.strip()[:64]
     return shas
+
+
+#: Substrings that mean a runtime refused for usage reasons.
+#:
+#: The protocol exposes no remaining balance, so exhaustion is only ever
+#: visible as a refusal. Matching text is crude and it is what there is; a
+#: miss costs one wasted cycle, and the alternative — treating every failure
+#: as exhaustion — would park healthy runtimes.
+USAGE_LIMIT_MARKERS = (
+    "you've hit your",
+    "usage limit",
+    "usagelimitexceeded",
+    "out of usage",
+    "out of credits",
+    "insufficient_quota",
+    "quota exceeded",
+    "rate limit",
+    "rate_limit",
+    "429",
+)
+
+
+def looks_exhausted(text: str | None) -> bool:
+    """Whether this text is a runtime saying it has nothing left."""
+    if not text:
+        return False
+    lowered = text.casefold()
+    return any(marker in lowered for marker in USAGE_LIMIT_MARKERS)
+
+
+def resume_section(resume: dict | None) -> str:
+    """What a cycle continuing someone else's work is told.
+
+    The rejected approaches go first and are stated as instructions rather
+    than as history, because they are the part that actually saves the budget:
+    a cycle that re-derives the last one's dead end has spent its runtime to
+    learn something already written down.
+    """
+    if not isinstance(resume, dict) or not resume:
+        return ""
+    lines = [
+        "## You are continuing unfinished work",
+        "",
+        "A previous cycle on this repository ran out of runtime before it "
+        "could publish. Continue it rather than starting again.",
+        "",
+    ]
+    if resume.get("goal"):
+        lines += [f"**What it was doing:** {resume['goal']}", ""]
+    if resume.get("branch"):
+        pushed = resume.get("branch_pushed", True)
+        lines += [
+            f"**Its branch:** `{resume['branch']}`"
+            + ("" if pushed else " — never pushed, so its commits are gone"),
+            "",
+        ]
+    for title, key in (
+        ("Already done", "done"),
+        ("Do NOT repeat these — they were tried and rejected", "do_not"),
+        ("Next steps it left", "next_steps"),
+    ):
+        items = resume.get(key) or []
+        if items:
+            lines += [f"**{title}:**", ""]
+            lines += [f"- {item}" for item in items]
+            lines += [""]
+    return "\n".join(lines)

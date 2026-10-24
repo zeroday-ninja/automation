@@ -235,3 +235,50 @@ def test_a_prompt_digest_identifies_the_instructions_without_storing_them(
     assert first == again
     assert first != other
     assert "retry" not in first
+
+
+def test_a_refusal_for_usage_is_told_apart_from_an_ordinary_failure(
+    preset,
+) -> None:
+    # Arrange: the real notices, and a failure that is not one.
+    exhausted = [
+        "You've hit your limit · resets 3pm (America/New_York)",
+        "Error: usageLimitExceeded",
+        "HTTP 429 Too Many Requests",
+    ]
+
+    # Act / Assert: a miss costs one wasted cycle; treating every failure as
+    # exhaustion would park healthy runtimes, which is far worse.
+    for text in exhausted:
+        assert preset.looks_exhausted(text) is True
+    assert preset.looks_exhausted("connection reset by peer") is False
+    assert preset.looks_exhausted(None) is False
+
+
+def test_rejected_approaches_are_stated_as_instructions_not_history(
+    preset,
+) -> None:
+    # Arrange
+    resume = {
+        "goal": "replace the polling loop",
+        "branch": "improve/20261024",
+        "do_not": ["threads: the GIL serialised them"],
+        "next_steps": ["finish the regression test"],
+        "done": ["read the callback docs"],
+    }
+
+    # Act
+    section = preset.resume_section(resume)
+
+    # Assert: the dead ends come before the next steps, because a cycle that
+    # re-derives one has spent its runtime learning something already written
+    # down.
+    assert section.index("Do NOT repeat") < section.index("Next steps")
+    assert "the GIL serialised them" in section
+
+
+def test_a_cycle_with_nothing_to_continue_is_told_nothing(preset) -> None:
+    # Assert: an empty section rather than a heading with nothing under it,
+    # which would read as "someone tried and left you no detail".
+    assert preset.resume_section(None) == ""
+    assert preset.resume_section({}) == ""

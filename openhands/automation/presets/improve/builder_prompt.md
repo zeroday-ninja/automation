@@ -7,6 +7,7 @@ The repository is already cloned into `{{REPO_PATH}}` **inside your working
 directory**. `cd` there and work there. If that directory is not where you
 expect, find it rather than stopping: it is the only clone in your workspace.
 
+{{RESUME_SECTION}}
 {{SOUL_SECTION}}
 {{IDENTITY_SECTION}}
 {{FOCUS_SECTION}}
