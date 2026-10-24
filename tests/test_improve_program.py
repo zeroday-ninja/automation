@@ -402,13 +402,33 @@ class TestRotatingTheBuilder:
         # anything. Taking turns is what puts each one on the other side.
         assert builders == [BUILDER, REVIEWER, BUILDER]
 
-    async def test_rejects_naming_reviewers_while_the_builder_moves(self, async_client):
-        # On the turn a named reviewer builds, it would be asked to review
-        # itself.
+    async def test_the_rotation_can_name_itself_as_the_review_pool(self, async_client):
+        # The only way to say "these runtimes, and no others": an empty
+        # reviewer list draws from every profile on the server, so a local
+        # model added for something else starts reviewing.
         response = await async_client.post(
             PRESET,
             json={
-                "name": "Self review by rotation",
+                "name": "Two runtimes, reviewing each other",
+                "trigger": CRON,
+                "improve": improve_config(
+                    rotate_builder=[REVIEWER],
+                    reviewer_profile_ids=[BUILDER, REVIEWER],
+                ),
+            },
+        )
+
+        # Each turn's builder is skipped from its own review, leaving the
+        # other one — which is the whole point of the rotation.
+        assert response.status_code == 201, response.text
+
+    async def test_rejects_a_rotation_turn_that_nobody_would_review(self, async_client):
+        # Reviewers = [REVIEWER] with REVIEWER in the rotation: on its own
+        # turn it is skipped, and there is nobody left.
+        response = await async_client.post(
+            PRESET,
+            json={
+                "name": "A turn nobody reviews",
                 "trigger": CRON,
                 "improve": improve_config(
                     rotate_builder=[REVIEWER],
@@ -417,7 +437,7 @@ class TestRotatingTheBuilder:
             },
         )
         assert response.status_code == 422
-        assert "reviewer_profile_ids" in response.text
+        assert "unreviewed" in response.text
 
     async def test_rejects_a_builder_listed_twice(self, async_client):
         response = await async_client.post(

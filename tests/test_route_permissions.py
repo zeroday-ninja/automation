@@ -29,6 +29,11 @@ MANAGE_ONLY_ROUTES = {
     ("POST", "/api/automation/v1/git-sync/remotes/{remote_id}/check"),
     ("POST", "/api/automation/v1/git-sync/remotes/{remote_id}/sync"),
     ("PUT", "/api/automation/v1/git-sync/assignments/{automation_id}"),
+    # Rewriting what an improvement program does, and repackaging the code it
+    # runs, are owner operations: a member who could do either could point
+    # somebody else's program at a different repository.
+    ("PUT", "/api/automation/v1/improve/{automation_id}/config"),
+    ("POST", "/api/automation/v1/improve/{automation_id}/refresh-code"),
 }
 
 # Every check that require_permission() returns shares this code object.
