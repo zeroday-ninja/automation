@@ -1155,6 +1155,7 @@ def _load_improve_preset_files() -> dict[str, str]:
         _IMPROVE_PRESET_CACHE = {
             "main.py": (IMPROVE_PRESET_DIR / "sdk_main.py").read_text(),
             "report.py": (IMPROVE_PRESET_DIR / "report.py").read_text(),
+            "context.py": (IMPROVE_PRESET_DIR / "context.py").read_text(),
             "setup.sh": (IMPROVE_PRESET_DIR / "setup.sh").read_text(),
             "builder_prompt.md": (IMPROVE_PRESET_DIR / "builder_prompt.md").read_text(),
             "reviewer_prompt.md": (
@@ -1177,6 +1178,7 @@ def _generate_improve_tarball() -> bytes:
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
         _add_file_to_tar(tar, "report.py", preset_files["report.py"])
+        _add_file_to_tar(tar, "context.py", preset_files["context.py"])
         _add_file_to_tar(tar, "builder_prompt.md", preset_files["builder_prompt.md"])
         _add_file_to_tar(tar, "reviewer_prompt.md", preset_files["reviewer_prompt.md"])
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)

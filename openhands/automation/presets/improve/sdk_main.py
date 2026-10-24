@@ -119,6 +119,12 @@ from openhands.workspace import OpenHandsCloudWorkspace  # noqa: E402
 
 # Packaged alongside main.py in the tarball; see its docstring for why the
 # report parsing lives in a module that can be imported without side effects.
+from context import (  # noqa: E402
+    fetch_identity_set,
+    identity_sections,
+    project_identity_sections,
+    read_project_identity,
+)
 from report import (  # noqa: E402
     MAX_SUMMARY_CHARS,
     parse_json_report,
@@ -247,38 +253,6 @@ def quoted_section(title: str, body: str | None, absent_note: str) -> str:
     if not body:
         return f"## {title}\n\n{absent_note}\n"
     return f"## {title}\n\n{body}\n"
-
-
-def fetch_soul(workspace) -> str | None:
-    """The user's SOUL.md from the agent server, if that server serves it.
-
-    Older agent servers have no such route; a program should still run, just
-    without the user's standing preferences, so a 404 is not an error here.
-    """
-    try:
-        response = workspace.client.get("/api/soul")
-        if response.status_code == 404:
-            print("  agent server has no /api/soul route (older version)")
-            return None
-        response.raise_for_status()
-        payload = response.json()
-    except Exception as exc:
-        print(f"  SOUL.md fetch failed (non-fatal): {exc}")
-        return None
-    if not isinstance(payload, dict):
-        return None
-    # Only a soul the user actually wrote. The server returns its built-in
-    # default otherwise, which says nothing about this user's preferences.
-    if not payload.get("exists"):
-        print("  no user SOUL.md on the agent server")
-        return None
-    content = payload.get("content")
-    if not isinstance(content, str) or not content.strip():
-        return None
-    text = content.strip()
-    if len(text) > MAX_DOC_CHARS:
-        text = text[:MAX_DOC_CHARS] + "\n\n[truncated]"
-    return text
 
 
 def list_agent_profiles(workspace) -> dict:
@@ -505,24 +479,16 @@ def execute_cycle(workspace) -> None:
 
         # --- Assemble the context the cycle reasons from --------------------
         print("\n=== CONTEXT ===")
-        soul = fetch_soul(workspace)
-        identity = read_doc(os.path.join(repo_path, "PROJECT_IDENTITY.md"))
-        print(f"  SOUL.md: {'yes' if soul else 'no'}")
-        print(f"  PROJECT_IDENTITY.md: {'yes' if identity else 'no'}")
+        identity_documents, identity_note = fetch_identity_set(workspace)
+        project_documents = read_project_identity(repo_path)
+        print(f"  user identity: {sorted(identity_documents) or 'none'}")
+        print(f"  project identity: {sorted(project_documents) or 'none'}")
+        if identity_note:
+            print(f"  WARNING: {identity_note}")
 
-        soul_section = quoted_section(
-            "The user's standing preferences (SOUL.md)",
-            soul,
-            "The user has not written a SOUL.md yet. Work to the repository's "
-            "own conventions and do not invent preferences for them.",
-        )
-        identity_section = quoted_section(
-            f"What {repo_label} is for (PROJECT_IDENTITY.md)",
-            identity,
-            f"{repo_label} has no PROJECT_IDENTITY.md. Infer its purpose and "
-            "current goals from its README, its AGENTS.md and its recent "
-            "commits, and say in your report that the document is missing — "
-            "writing a first draft of it is itself a good cycle.",
+        soul_section = identity_sections(identity_documents, identity_note)
+        identity_section = project_identity_sections(
+            project_documents, repo_label
         )
         focus = clamp(config.get("focus"), 4000)
         focus_section = (
