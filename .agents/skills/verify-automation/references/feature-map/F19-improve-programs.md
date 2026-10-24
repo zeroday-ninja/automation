@@ -31,6 +31,7 @@ Routes: `POST /api/automation/v1/preset/improve`, `POST /api/automation/v1/impro
 `GET /api/automation/v1/improve/{automation_id}/cycles`,
 `POST /api/automation/v1/improve/{automation_id}/refresh-code`,
 `GET /api/automation/v1/improve/runtime-usage`,
+`GET /api/automation/v1/improve/builder-share`,
 `GET /api/automation/v1/improve/parked`,
 `POST /api/automation/v1/improve/cycles/{cycle_id}/resolve`,
 `POST /api/automation/v1/improve/cycles/{cycle_id}/attest`,
@@ -64,6 +65,8 @@ Routes: `POST /api/automation/v1/preset/improve`, `POST /api/automation/v1/impro
 - `F19.refresh-code`: `POST .../refresh-code` repackages the runner from this build without touching the program's configuration, so a service upgrade reaches an existing program; it needs `manage_automations`.
 - `F19.usage-ledger`: `GET /v1/improve/runtime-usage` answers which runtimes have usage left, with the evidence behind each reading — what was last seen, when it last refused, how many times in a row, and whether the reset time came from the runtime or from a default cooldown. Recovery is applied at read time, so an exhaustion whose reset has passed reads as available while the exhaustion stays on the record.
 - `F19.usage-unknown`: a runtime nobody has observed is absent rather than reported healthy, and `unknown` stays distinct from `available` — nothing having gone wrong is not the same as something having gone right.
+- `F19.builder-share`: `GET /v1/improve/builder-share` answers how evenly the building was divided between runtimes over a window of `days`: each runtime's cycles and its share of them, and `evenness_gap`, the widest share's distance from an even split in percentage points, against the `target_gap: 20.0` the plan asks for, carried with the answer so a reader does not have to know it. Counted from each cycle's builder of record, which is the runtime that actually ran rather than the one the profile named, and `null` rather than a gap of zero when nothing was built.
+- `F19.builder-share-not-yet`: `days_covered` travels with that answer and `within_target` is null, not false, until it reaches the window: a week asked of a day of history still reports the gap and withholds the verdict, because an unmet measure and an unmeasurable one are different answers.
 - `F19.parked-list`: `GET /v1/improve/parked` answers everything waiting for a person across every program in the org, because the question is "what is waiting on me" and an answer that needs the reader to know which program to look in is not an answer.
 - `F19.resolve`: `POST .../resolve` records a person's answer with a required reason and returns the cycle to the phase it stopped at; `archive` ends it as COMPLETED with a REJECTED verdict, because a decision is not a malfunction. It needs `manage_automations` — the point of escalating is that the thing being gated is not the thing that answers.
 - `F19.resolve-not-escalate`: `escalate` is refused as an answer: that endpoint *is* the escalation, so escalating again would park the cycle on the person who just unparked it.
@@ -522,6 +525,36 @@ Preconditions:
   control-automation api GET /v1/improve/runtime-usage --expect 200 --check runtimes len-eq 0 --check earliest_reset eq null
   ```
 
+- **How evenly the building was divided (`F19.builder-share`, `F19.builder-share-not-yet`).** One
+  runtime holding everything, then a second runtime taking most of it, and the
+  verdict withheld while the window is longer than the history.
+  Requires: `F19.cycle-build`
+  ```sh
+  control-automation api GET /v1/improve/builder-share --query days=7 --expect 200 --check window_days eq 7 --check days_covered eq 1 --check cycles eq 1 --check runtimes len-eq 1 --check runtimes.0.runtime eq qa-runtime-one --check runtimes.0.cycles eq 1 --check runtimes.0.share eq 1.0 --check evenness_gap eq 0.0 --check target_gap eq 20.0 --check within_target eq null --save F19.builder-share-not-yet/week
+  BS1=$(control-automation api POST "/v1/improve/$AID/claim" --json '{}' --expect 201 --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$BS1" --json '{"status":"BUILDING","builder_runtime":"qa-runtime-two"}' --expect 200 --check builder_runtime eq qa-runtime-two
+  control-automation api GET /v1/improve/builder-share --query days=1 --expect 200 --check window_days eq 1 --check days_covered eq 1 --check cycles eq 2 --check runtimes len-eq 2 --check runtimes.0.share eq 0.5 --check runtimes.1.share eq 0.5 --check evenness_gap eq 0.0 --check within_target eq true --save F19.builder-share/even
+  BS2=$(control-automation api POST "/v1/improve/$AID/claim" --json '{}' --expect 201 --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$BS2" --json '{"status":"BUILDING","builder_runtime":"qa-runtime-two"}' --expect 200
+  BS3=$(control-automation api POST "/v1/improve/$AID/claim" --json '{}' --expect 201 --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$BS3" --json '{"status":"BUILDING","builder_runtime":"qa-runtime-two"}' --expect 200
+  control-automation api GET /v1/improve/builder-share --query days=1 --expect 200 --check cycles eq 4 --check runtimes len-eq 2 --check runtimes.0.runtime eq qa-runtime-two --check runtimes.0.cycles eq 3 --check runtimes.0.share eq 0.75 --check runtimes.1.runtime eq qa-runtime-one --check runtimes.1.share eq 0.25 --check evenness_gap eq 25.0 --check within_target eq false --save F19.builder-share/lopsided
+  control-automation api GET /v1/improve/builder-share --query days=7 --expect 200 --check days_covered eq 1 --check cycles eq 4 --check evenness_gap eq 25.0 --check within_target eq null --save F19.builder-share-not-yet/uncovered
+  control-automation api GET /v1/improve/builder-share --query days=0 --expect 200 --check window_days eq 1 --check evenness_gap eq 25.0 --check within_target eq false
+  control-automation api GET /v1/improve/builder-share --query days=abc --expect 422 --check detail.0.type eq int_parsing
+  ```
+  The share is read off the cycles rather than the ledger, whose counters are
+  per day and roll over: the runtime of record on a cycle is the one that
+  actually ran, so a cycle that failed over mid-change counts for whichever
+  runtime finished it. Three cycles against one is 75/25 where an even split
+  is 50, so the gap is 25 points and the answer is `within_target: false` —
+  the verdict, not a bare number for the reader to judge against a threshold
+  they would have to know. The same gap asked of a week comes back with
+  `within_target: null` and `days_covered: 1`, because every cycle a replay
+  creates was created today; only the verdict is withheld, the measurement is
+  still reported. `days` is clamped rather than refused, so `days=0` asks
+  about today, and only a value that is not an integer is a 422.
+
 - **Park a change and answer it (`F19.parked-list`, `F19.resolve`, `F19.resolve-not-escalate`, `F19.resolve-not-parked`, `F19.gate-log`).**
   Requires: `F19.create`
   ```sh
@@ -593,3 +626,15 @@ Preconditions:
   labels, as these recipes do, instead of assuming the order the remotes were
   created in: SQLite stores `created_at` to the second, so remotes created in
   the same second are ordered by their random id.
+- `GET /v1/improve/builder-share` divides by the runtimes that *built*
+  something in the window, not by the runtimes a program is configured with,
+  so one runtime holding every cycle reads as `evenness_gap: 0.0` and, once
+  the window is covered, `within_target: true` — the first reading in the
+  builder-share bullet is exactly that shape. Read `runtimes` beside the gap,
+  as that bullet does: a rotation that has collapsed to a single runtime is
+  the thing the program exists to fix, and the gap alone calls it even.
+- `days_covered` counts from the oldest cycle inside the window, so every
+  cycle a replay creates is "today" and a seven-day verdict is unreachable in
+  one run; ask for `days=1` to see `within_target` resolve. `days` is clamped
+  into 1..365 rather than refused, so `days=0` answers about today and
+  `days=400` about a year.
