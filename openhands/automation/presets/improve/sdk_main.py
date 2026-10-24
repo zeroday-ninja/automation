@@ -93,6 +93,15 @@ for label, value in (
 AUTOMATION_PHASE_URL = os.environ.get("AUTOMATION_PHASE_URL", "")
 
 
+#: Phases that never reached the service, counted so a lost one is visible.
+#:
+#: The phase is the only thing a person watching sees change, so a run whose
+#: phase POSTs are failing looks stalled while it is working — and before
+#: this, nothing anywhere said otherwise. It stays non-fatal: a cosmetic
+#: update must not end a cycle. It stops being silent.
+_LOST_PHASES: list[str] = []
+
+
 def report_phase(message: str) -> None:
     """POST a short progress phase to the automation service. Never raises."""
     if not AUTOMATION_PHASE_URL or not _CYCLE_TOKEN or not message:
@@ -100,14 +109,20 @@ def report_phase(message: str) -> None:
     try:
         import httpx
 
-        httpx.post(
+        response = httpx.post(
             AUTOMATION_PHASE_URL,
             json={"phase": message[:200]},
             headers={"Authorization": f"Bearer {_CYCLE_TOKEN}"},
             timeout=5.0,
         )
-    except Exception:
-        pass  # phases are cosmetic; the run must never fail because of them
+        response.raise_for_status()
+    except Exception as exc:
+        # The first one says what went wrong; the rest are counted, because a
+        # service that is down fails every phase and a hundred identical
+        # lines would bury the work they are interleaved with.
+        if not _LOST_PHASES:
+            print(phase_failure_notice(f"{type(exc).__name__}: {exc}"))
+        _LOST_PHASES.append(message[:200])
 
 
 # SDK imports (before the workspace context so import errors are caught)
@@ -128,6 +143,8 @@ from routing import GateDecision, route_for  # noqa: E402
 from context import (  # noqa: E402
     fetch_identity_set,
     looks_exhausted,
+    lost_phase_summary,
+    phase_failure_notice,
     ran_out_of_time,
     resume_section,
     git_commit_range,
@@ -1609,4 +1626,7 @@ with workspace_ctx as workspace:
     execute_cycle(workspace)
 
 print("\n=== RESULT ===")
+_lost = lost_phase_summary(_LOST_PHASES)
+if _lost:
+    print(_lost)
 print("ALL_OK")
