@@ -109,6 +109,7 @@ file.
   "changed_files": ["path/to/file"],
   "checks": [{"command": "what you ran", "result": "pass | fail | skipped", "detail": "why, if not pass"}],
   "sources": [{"url": "https://...", "title": "what it is", "note": "the specific claim in this change that this source supports"}],
+  "change_class": "additive | deleting | breaking",
   "followups": ["something you deliberately did not do"],
   "risks": ["what a reviewer should attack first"],
   "soul_suggestions": [{"text": "a preference, as the user would want it stated", "why": "what in this cycle suggested it"}]
@@ -119,6 +120,15 @@ Rules for the report:
 
 - `sources` must be non-empty when `status` is `changed`. Every entry must be
   a URL you actually read this cycle.
+- `change_class` is your own reading of what your change does to anyone
+  relying on this code. `additive` adds something and takes nothing away;
+  `deleting` removes code that was there; `breaking` removes or renames
+  something other code calls, changes a wire contract, bumps a dependency's
+  major version, or drops data. **Your answer does not decide the gate** — the
+  class is computed from your diff either way. It is recorded next to the
+  computed one, and a claim that understates the diff is reported as a finding,
+  so answer it the way you actually read your change rather than the way that
+  sounds easiest to approve.
 - `risks` is where you are honest. Name the weakest part of your own change.
   A reviewer on another runtime is about to look for it, and a cycle that
   hides its weak point fails on the next step rather than this one.

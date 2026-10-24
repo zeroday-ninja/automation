@@ -849,3 +849,75 @@ class TestCycleReporting:
             f"/api/automation/v1/improve/{program['id']}/cycles"
         )
         assert response.status_code == 404
+
+
+class TestTheServiceKeepsTheRestrictiveReading:
+    """The floor under a client that is wrong or lying.
+
+    The class is computed from the diff by code shipped with the program, so
+    the service does not normally need to second-guess it. But the thing being
+    gated must not be able to lower its own gate, so a report whose evidence
+    contradicts its class is read the restrictive way.
+    """
+
+    async def test_a_report_that_contradicts_itself_is_read_restrictively(
+        self, async_client
+    ):
+        # Arrange
+        await add_remote(async_client, "https://github.com/acme/alpha", "alpha")
+        program = await create_program(async_client)
+        cycle_id = (await claim(async_client, program["id"])).json()["cycle"]["id"]
+
+        # Act: "additive", with a removed export in its own evidence.
+        response = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "change_class": "additive",
+                "claimed_change_class": "additive",
+                "change_evidence": {
+                    "change_class": "additive",
+                    "reasons": [
+                        {
+                            "rule": "removed_export",
+                            "path": "openhands/service.py",
+                            "detail": "-def resolve_backend(name: str) -> str:",
+                        }
+                    ],
+                },
+            },
+        )
+
+        # Assert: the claim is kept as what was claimed, and the class is
+        # raised to what the evidence requires.
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["change_class"] == "breaking"
+        assert body["claimed_change_class"] == "additive"
+
+    async def test_an_honest_report_is_stored_as_sent(self, async_client):
+        # Arrange
+        await add_remote(async_client, "https://github.com/acme/beta", "beta")
+        program = await create_program(async_client)
+        cycle_id = (await claim(async_client, program["id"])).json()["cycle"]["id"]
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "change_class": "deleting",
+                "claimed_change_class": "deleting",
+                "change_evidence": {
+                    "change_class": "deleting",
+                    "reasons": [
+                        {
+                            "rule": "file_deleted",
+                            "path": "openhands/_scratch.py",
+                            "detail": "the whole file was removed",
+                        }
+                    ],
+                },
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["change_class"] == "deleting"

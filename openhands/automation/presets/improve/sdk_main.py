@@ -25,6 +25,7 @@ pieces specific to this preset are:
 """
 
 import os
+import subprocess
 from datetime import datetime, timezone
 import sys
 import time
@@ -120,6 +121,7 @@ from openhands.workspace import OpenHandsCloudWorkspace  # noqa: E402
 
 # Packaged alongside main.py in the tarball; see its docstring for why the
 # report parsing lives in a module that can be imported without side effects.
+from change_class import assess_diff, claim_mismatch  # noqa: E402
 from context import (  # noqa: E402
     fetch_identity_set,
     looks_exhausted,
@@ -271,6 +273,39 @@ def runtime_trace(
             f"({switch['reason']})"
         )
     return trace
+
+
+def classify_change(repo_path: str, base_ref: str, branch: str):
+    """Which class of change this cycle made, read from its own diff.
+
+    Not asked of the builder: the class decides who may publish, so a builder
+    that called its own deletion additive would be deciding its own gate. The
+    builder's claim is reported separately and compared.
+
+    ``None`` when the diff cannot be read, which is a degraded cycle rather
+    than an additive one: an unreadable diff is not evidence of a safe change.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--no-color", f"{base_ref}...{branch}"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception as exc:
+        print(f"  WARNING: could not read the diff to classify it: {exc}")
+        return None
+    if result.returncode != 0:
+        print(f"  WARNING: git diff failed: {result.stderr.strip()[:200]}")
+        return None
+    assessment = assess_diff(result.stdout)
+    print(
+        f"  change class: {assessment.change_class} "
+        f"(+{assessment.insertions}/-{assessment.deletions}, "
+        f"{len(assessment.reasons)} reason(s))"
+    )
+    return assessment
 
 
 def _no_updates_answer(error: str | None) -> str | None:
@@ -833,9 +868,31 @@ def execute_cycle(workspace) -> None:
             "verdict_rule_version": VERDICT_RULE_VERSION,
             "runtime_switches": trace["switches"],
             "runtime_observations": observations[-MAX_OBSERVATIONS:],
+            # What the builder said it did, kept beside what the diff says it
+            # did. The service raises the class to whatever the evidence
+            # requires, so an understated claim cannot lower the gate.
+            "claimed_change_class": clamp(report.get("change_class"), 32),
         }
         shas = git_commit_range(repo_path, base_ref, reported_branch)
         builder_update.update(shas)
+        assessment = classify_change(repo_path, base_ref, reported_branch)
+        if assessment is not None:
+            builder_update["change_class"] = assessment.change_class
+            builder_update["change_evidence"] = assessment.as_dict()
+            mismatch = claim_mismatch(report.get("change_class"), assessment)
+            if mismatch:
+                # A claim that understates the diff is a finding in its own
+                # right, recorded where the reviewers will read it.
+                print(f"  WARNING: {mismatch}")
+                risks = [mismatch, *risks]
+                builder_update["risks"] = risks[:40]
+        else:
+            risks = [
+                "The cycle's own diff could not be read, so its change class "
+                "is unknown rather than additive.",
+                *risks,
+            ]
+            builder_update["risks"] = risks[:40]
         if soul_suggestions:
             builder_update["soul_suggestions"] = soul_suggestions
         if pr_url:

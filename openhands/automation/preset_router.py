@@ -1156,6 +1156,13 @@ def _load_improve_preset_files() -> dict[str, str]:
             "main.py": (IMPROVE_PRESET_DIR / "sdk_main.py").read_text(),
             "report.py": (IMPROVE_PRESET_DIR / "report.py").read_text(),
             "context.py": (IMPROVE_PRESET_DIR / "context.py").read_text(),
+            # Shipped from the service package rather than from the preset
+            # directory: the service re-reads a reported class against the
+            # same rules, so there must be exactly one copy of them. The
+            # module is stdlib-only for this reason.
+            "change_class.py": (
+                Path(__file__).parent / "improve" / "change_class.py"
+            ).read_text(),
             "setup.sh": (IMPROVE_PRESET_DIR / "setup.sh").read_text(),
             "builder_prompt.md": (IMPROVE_PRESET_DIR / "builder_prompt.md").read_text(),
             "reviewer_prompt.md": (
@@ -1180,6 +1187,7 @@ def _generate_improve_tarball() -> bytes:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
         _add_file_to_tar(tar, "report.py", preset_files["report.py"])
         _add_file_to_tar(tar, "context.py", preset_files["context.py"])
+        _add_file_to_tar(tar, "change_class.py", preset_files["change_class.py"])
         _add_file_to_tar(tar, "builder_prompt.md", preset_files["builder_prompt.md"])
         _add_file_to_tar(tar, "reviewer_prompt.md", preset_files["reviewer_prompt.md"])
         _add_file_to_tar(tar, "handoff_prompt.md", preset_files["handoff_prompt.md"])

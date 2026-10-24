@@ -222,6 +222,30 @@ class UpdateCycleRequest(BaseModel):
             "indistinguishable from a restart."
         ),
     )
+    change_class: str | None = Field(
+        default=None,
+        max_length=16,
+        description=(
+            "Which class of change the diff is: 'additive', 'deleting' or "
+            "'breaking'. Computed from the diff by code that ships with the "
+            "program, never the builder's opinion of its own work."
+        ),
+    )
+    claimed_change_class: str | None = Field(
+        default=None,
+        max_length=32,
+        description=(
+            "What the builder said the change was. Stored beside the computed "
+            "class because a claim that understates it is itself a finding."
+        ),
+    )
+    change_evidence: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "The rules that fired and the lines they fired on. A class with no "
+            "evidence behind it cannot be disagreed with."
+        ),
+    )
     runtime_switches: list[dict[str, Any]] | None = Field(
         default=None,
         max_length=20,
@@ -277,6 +301,9 @@ class CycleResponse(BaseModel):
     builder_profile_id: uuid.UUID | None
     builder_runtime: str | None
     runtime_switches: list[dict[str, Any]] | None = None
+    change_class: str | None = None
+    claimed_change_class: str | None = None
+    change_evidence: dict[str, Any] | None = None
     builder_conversation_id: str | None
     summary: str | None
     branch: str | None
@@ -319,6 +346,9 @@ class CycleResponse(BaseModel):
             builder_profile_id=cycle.builder_profile_id,
             builder_runtime=cycle.builder_runtime,
             runtime_switches=cycle.runtime_switches,
+            change_class=cycle.change_class,
+            claimed_change_class=cycle.claimed_change_class,
+            change_evidence=cycle.change_evidence,
             builder_conversation_id=cycle.builder_conversation_id,
             summary=cycle.summary,
             branch=cycle.branch,
