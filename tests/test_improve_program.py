@@ -9,6 +9,7 @@ what the dashboard promises is what the next run actually takes.
 
 import uuid
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import ClassVar
 
 import pytest
@@ -181,6 +182,128 @@ class TestCreateProgram:
             },
         )
         assert response.status_code == 422
+
+
+class TestTheBuilderShare:
+    """The rotation's own measure, which nothing could read.
+
+    The program exists because one runtime built 31 of 33 cycles. The plan
+    asks for "builder share across the three runtimes within twenty percent of
+    even over a week" — and the only number available was the ledger's daily
+    counter, which rolls over at midnight and so says nothing about a rotation
+    at all.
+    """
+
+    async def _cycle_built_by(
+        self, async_session, program_id: str, runtime: str, *, days_ago: float
+    ) -> None:
+        cycle = AutomationImproveCycle(
+            id=uuid.uuid4(),
+            automation_id=uuid.UUID(program_id),
+            org_id=ORG_ID,
+            repo_index=0,
+            repo_label="alpha",
+            repo_url="https://github.com/acme/alpha",
+            status=ImproveCycleStatus.COMPLETED,
+            builder_runtime=runtime,
+            created_at=datetime.now(UTC) - timedelta(days=days_ago),
+        )
+        async_session.add(cycle)
+        await async_session.flush()
+
+    async def test_an_even_rotation_is_within_the_target(
+        self, async_client, async_session
+    ):
+        # Arrange: three runtimes, nine cycles, spread over a full week.
+        program = await create_program(async_client)
+        for index, runtime in enumerate(["claude-code", "codex", "antigravity"] * 3):
+            await self._cycle_built_by(
+                async_session, program["id"], runtime, days_ago=6.5 - index * 0.7
+            )
+        await async_session.commit()
+
+        # Act
+        response = await async_client.get(
+            "/api/automation/v1/improve/builder-share?days=7"
+        )
+
+        # Assert
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["cycles"] == 9
+        assert {r["runtime"]: r["cycles"] for r in body["runtimes"]} == {
+            "claude-code": 3,
+            "codex": 3,
+            "antigravity": 3,
+        }
+        assert body["evenness_gap"] == 0.0
+        assert body["within_target"] is True
+
+    async def test_the_lopsided_split_the_rotation_exists_to_fix_is_reported(
+        self, async_client, async_session
+    ):
+        # Arrange: the shape the plan was written against — one runtime doing
+        # almost all of it.
+        program = await create_program(async_client)
+        for index in range(9):
+            await self._cycle_built_by(
+                async_session, program["id"], "claude-code", days_ago=6.5 - index * 0.7
+            )
+        await self._cycle_built_by(async_session, program["id"], "codex", days_ago=0.2)
+        await async_session.commit()
+
+        # Act
+        response = await async_client.get(
+            "/api/automation/v1/improve/builder-share?days=7"
+        )
+
+        # Assert: 90/10 against an even 50, so 40 points out — twice the
+        # threshold, and reported as failing rather than as a bare number.
+        body = response.json()
+        assert body["evenness_gap"] == 40.0
+        assert body["within_target"] is False
+        assert body["target_gap"] == 20.0
+
+    async def test_a_week_asked_of_two_days_is_not_yet_rather_than_a_verdict(
+        self, async_client, async_session
+    ):
+        # The honest answer to "is it even over a week" with two days of
+        # history is "ask again later". Reporting False would say the rotation
+        # failed; reporting True would be worse.
+        program = await create_program(async_client)
+        await self._cycle_built_by(
+            async_session, program["id"], "claude-code", days_ago=1.0
+        )
+        await self._cycle_built_by(async_session, program["id"], "codex", days_ago=0.1)
+        await async_session.commit()
+
+        response = await async_client.get(
+            "/api/automation/v1/improve/builder-share?days=7"
+        )
+
+        body = response.json()
+        assert body["days_covered"] == 2
+        assert body["window_days"] == 7
+        assert body["within_target"] is None
+        # The measurement is still reported; only the verdict is withheld.
+        assert body["evenness_gap"] == 0.0
+
+    async def test_nothing_built_is_no_measurement_rather_than_a_perfect_one(
+        self, async_client
+    ):
+        # An empty window has no widest share to be far from even, and
+        # reporting a gap of zero would read as a flawless rotation.
+        await create_program(async_client)
+
+        response = await async_client.get(
+            "/api/automation/v1/improve/builder-share?days=7"
+        )
+
+        body = response.json()
+        assert body["cycles"] == 0
+        assert body["runtimes"] == []
+        assert body["evenness_gap"] is None
+        assert body["within_target"] is None
 
 
 class TestTheProgramsPackagedCode:

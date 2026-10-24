@@ -385,6 +385,45 @@ class RuntimeUsageResponse(BaseModel):
     earliest_reset: UtcDatetime | None = None
 
 
+class BuilderShareEntry(BaseModel):
+    """One runtime's share of the building over the window."""
+
+    runtime: str
+    cycles: int
+    #: 0..1. The fraction, not the count: the measure is a share, and a count
+    #: means nothing without the denominator beside it.
+    share: float
+
+
+class BuilderShareResponse(BaseModel):
+    """How evenly the work was divided, and whether that can be trusted yet.
+
+    The plan's measure for runtime rotation is "builder share across the three
+    runtimes within twenty percent of even over a week", against a starting
+    point where one runtime built 31 of 33 cycles. It had no meter: the ledger
+    counts per day and rolls over, so nothing could answer it.
+
+    ``days_covered`` is reported beside the answer because the honest result
+    of asking for a week on two days of history is "not yet", and a caller
+    that cannot tell the difference reports a number that means nothing.
+    """
+
+    window_days: int
+    since: UtcDatetime
+    days_covered: int
+    cycles: int
+    runtimes: list[BuilderShareEntry]
+    #: How far the busiest runtime is from an even split, in percentage
+    #: points. Null when nothing was built -- which is not a gap of zero.
+    evenness_gap: float | None = None
+    #: The plan's threshold, carried with the answer so a reader does not have
+    #: to know it to interpret the number.
+    target_gap: float = 20.0
+    #: Null, not False, while the window is not covered: an unmet measure and
+    #: an unmeasurable one are different answers.
+    within_target: bool | None = None
+
+
 class AuthorityResponse(BaseModel):
     """Whether a change may publish, and what is standing in the way."""
 

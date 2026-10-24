@@ -46,6 +46,8 @@ from openhands.automation.improve.routing import GateDecision, normalize_route
 from openhands.automation.improve.schemas import (
     AttestCycleRequest,
     AuthorityResponse,
+    BuilderShareEntry,
+    BuilderShareResponse,
     ClaimCycleRequest,
     ClaimCycleResponse,
     CycleListResponse,
@@ -60,7 +62,9 @@ from openhands.automation.improve.schemas import (
 )
 from openhands.automation.improve.usage import (
     RuntimeObservation,
+    builder_share,
     earliest_reset,
+    evenness_gap,
     last_observation_of,
     observed_runtimes,
     record_observations,
@@ -693,6 +697,52 @@ async def get_runtime_usage(
             for name in runtimes
         ],
         earliest_reset=earliest_reset(statuses),
+    )
+
+
+@router.get("/builder-share")
+async def get_builder_share(
+    days: int = 7,
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session),
+) -> BuilderShareResponse:
+    """How evenly the building was divided between runtimes, over a window.
+
+    The rotation exists because one runtime built 31 of 33 cycles. The plan's
+    measure for whether that is fixed is a *share* over a week — and nothing
+    could read it: the ledger counts per day and rolls over, so the only
+    number available was "today", which says nothing about a rotation.
+
+    Counted from the cycles, where the recorded builder is the runtime that
+    actually ran rather than the one the profile named, because a cycle that
+    failed over mid-change belongs to whichever runtime finished it.
+
+    ``days_covered`` travels with the answer. A week asked of two days of
+    history is "not yet", not a result, and `within_target` is null rather
+    than false while that is true: an unmet measure and an unmeasurable one
+    are different answers.
+    """
+    window = max(1, min(days, 365))
+    shares, since, covered = await builder_share(session, user.org_id, days=window)
+    gap = evenness_gap(shares)
+    within = None
+    if covered >= window and gap is not None:
+        within = gap <= 20.0
+    return BuilderShareResponse(
+        window_days=window,
+        since=since,
+        days_covered=covered,
+        cycles=sum(entry.cycles for entry in shares),
+        runtimes=[
+            BuilderShareEntry(
+                runtime=entry.runtime,
+                cycles=entry.cycles,
+                share=round(entry.share, 4),
+            )
+            for entry in shares
+        ],
+        evenness_gap=gap,
+        within_target=within,
     )
 
 
