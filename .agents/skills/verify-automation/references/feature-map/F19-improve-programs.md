@@ -28,7 +28,13 @@ Routes: `POST /api/automation/v1/preset/improve`, `POST /api/automation/v1/impro
 `PATCH /api/automation/v1/improve/cycles/{cycle_id}`,
 `PUT /api/automation/v1/improve/{automation_id}/config`,
 `GET /api/automation/v1/improve/{automation_id}/rotation`,
-`GET /api/automation/v1/improve/{automation_id}/cycles`
+`GET /api/automation/v1/improve/{automation_id}/cycles`,
+`POST /api/automation/v1/improve/{automation_id}/refresh-code`,
+`GET /api/automation/v1/improve/runtime-usage`,
+`GET /api/automation/v1/improve/parked`,
+`POST /api/automation/v1/improve/cycles/{cycle_id}/resolve`,
+`POST /api/automation/v1/improve/cycles/{cycle_id}/attest`,
+`GET /api/automation/v1/improve/cycles/{cycle_id}/authority`
 
 ## Sub-features
 
@@ -55,6 +61,19 @@ Routes: `POST /api/automation/v1/preset/improve`, `POST /api/automation/v1/impro
 - `F19.not-a-program`: all three automation-scoped routes answer 409 for an automation that is not an improvement program (a raw automation and a prompt preset report different reasons), 404 for an unknown automation and 422 for an id that is not a UUID.
 - `F19.auth`: every route, including the config route that needs `manage_automations`, answers 401 without a key and with a wrong key, and creates no program and no cycle.
 - `F19.cycle-run`: a dispatched run claims a cycle, builds on a branch and has a second runtime review it (blocked here: needs two agent runtimes and their keys).
+- `F19.refresh-code`: `POST .../refresh-code` repackages the runner from this build without touching the program's configuration, so a service upgrade reaches an existing program; it needs `manage_automations`.
+- `F19.usage-ledger`: `GET /v1/improve/runtime-usage` answers which runtimes have usage left, with the evidence behind each reading — what was last seen, when it last refused, how many times in a row, and whether the reset time came from the runtime or from a default cooldown. Recovery is applied at read time, so an exhaustion whose reset has passed reads as available while the exhaustion stays on the record.
+- `F19.usage-unknown`: a runtime nobody has observed is absent rather than reported healthy, and `unknown` stays distinct from `available` — nothing having gone wrong is not the same as something having gone right.
+- `F19.parked-list`: `GET /v1/improve/parked` answers everything waiting for a person across every program in the org, because the question is "what is waiting on me" and an answer that needs the reader to know which program to look in is not an answer.
+- `F19.resolve`: `POST .../resolve` records a person's answer with a required reason and returns the cycle to the phase it stopped at; `archive` ends it as COMPLETED with a REJECTED verdict, because a decision is not a malfunction. It needs `manage_automations` — the point of escalating is that the thing being gated is not the thing that answers.
+- `F19.resolve-not-escalate`: `escalate` is refused as an answer: that endpoint *is* the escalation, so escalating again would park the cycle on the person who just unparked it.
+- `F19.resolve-not-parked`: resolving a cycle that is not PARKED answers 409 rather than silently doing nothing.
+- `F19.attest`: `POST .../attest` records the judge's verdict on a deletion, with each removal accounted for as dead, replaced or covered and a `where` that can be checked; attesting with no removals named is refused, because signing off a set of removals without naming them is signing off nothing.
+- `F19.attest-not-the-author`: an attestation from the runtime that built the change is refused 409. The service checks what actually signed rather than trusting the configuration, because a rotation moves the builder between cycles and a model favours its own output.
+- `F19.authority`: `GET .../authority` answers whether a change may publish, and what is standing in the way. Additive publishes on its own account; a deletion needs the judge's attestation; a breaking change is never authorised from here for anybody, and says so with `human_only` rather than as "not yet".
+- `F19.authority-evidence`: a change that cannot show a check that actually *passed* is returned as a proposal with the gaps named, and a check that *failed* is answered separately — it is evidence, not missing evidence.
+- `F19.gate-log`: every routing decision is appended with its route, trigger and required rationale; a decision the service cannot read is recorded as unreadable with the problem rather than dropped, because a client with a bug must not look like one that never decided anything.
+- `F19.change-class`: the change class is stored with the evidence it was computed from, and a report whose class contradicts its own evidence is stored at the restrictive reading — the thing being gated does not lower its own gate.
 
 ## How to get to it (agent POV)
 
@@ -141,11 +160,13 @@ Preconditions:
   repository's URL is accepted and dropped: refusing it would echo the secret
   back in the 422 body, and a cycle clones with a credential the Agent Server
   holds, so the stored URL never needs one.
-- **Generated runner tarball (`F19.tarball`).** Four members, an executable setup script, no configuration inside.
+- **Generated runner tarball (`F19.tarball`).** The runner, the prompts, the
+  rule modules the service shares with it, an executable setup script, and no
+  configuration inside.
   Requires: `F19.create`
   ```sh
   control-automation api GET "/v1/$AID/tarball" --expect 200 --quiet --check-header content-type eq application/x-tar --raw-out "$AUTOMATION_VERIFY_RUN/qa-improve.tar" --save F19.tarball/download
-  test "$(tar tzf "$AUTOMATION_VERIFY_RUN/qa-improve.tar" | sort | paste -sd, -)" = builder_prompt.md,main.py,report.py,reviewer_prompt.md,setup.sh
+  test "$(tar tzf "$AUTOMATION_VERIFY_RUN/qa-improve.tar" | sort | paste -sd, -)" = builder_prompt.md,change_class.py,context.py,handoff_prompt.md,judge_prompt.md,lessons.py,main.py,report.py,reviewer_prompt.md,routing.py,setup.sh
   tar tvzf "$AUTOMATION_VERIFY_RUN/qa-improve.tar" setup.sh | grep -q '^-rwxr-xr-x'
   tar xzOf "$AUTOMATION_VERIFY_RUN/qa-improve.tar" setup.sh | grep -q 'sdk-version'
   tar xzOf "$AUTOMATION_VERIFY_RUN/qa-improve.tar" main.py | grep -q '/v1/improve/{automation_id}/claim'
@@ -487,6 +508,55 @@ Preconditions:
   key itself still works and that the refused config writes left the
   program's own configuration untouched.
 - **A full cycle run (`F19.cycle-run`), blocked: needs two agent runtimes.** A dispatched program clones the claimed repository, has the builder profile implement one improvement on a `branch_prefix` branch with cited sources, and then has a profile on a *different* runtime review it, ending `COMPLETED` with a verdict (`SINGLE_RUNTIME` when no second runtime exists, `NO_CHANGE` when the builder decided against a change). It needs two agent profiles on different runtimes with their provider keys on the Agent Server, plus `pypi` for `setup.sh`; `llm preset deepseek` configures one model, not two runtimes. Drive it with `api POST /v1/$GID/dispatch` and `run wait` once such a pair exists, and read the result from `GET /v1/improve/$GID/cycles`.
+
+- **Repackage a program's runner (`F19.refresh-code`).** A service upgrade
+  reaches an existing program without an edit to its configuration.
+  Requires: `F19.create`
+  ```sh
+  control-automation api POST "/v1/improve/$AID/refresh-code" --expect 200 --check tarball_path matches '^oh-internal://uploads/[0-9a-f-]{36}$'
+  ```
+
+- **Read the usage ledger (`F19.usage-ledger`, `F19.usage-unknown`).** Nothing
+  has been observed yet, which is its own answer rather than an error.
+  ```sh
+  control-automation api GET /v1/improve/runtime-usage --expect 200 --check runtimes len-eq 0 --check earliest_reset eq null
+  ```
+
+- **Park a change and answer it (`F19.parked-list`, `F19.resolve`, `F19.resolve-not-escalate`, `F19.resolve-not-parked`, `F19.gate-log`).**
+  Requires: `F19.create`
+  ```sh
+  PCID=$(control-automation api POST "/v1/improve/$AID/claim" --expect 201 --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$PCID" --json '{"status":"PARKED","change_class":"breaking","branch":"improve/envelope","parked_phase":"publish","parked_question":"Publish the rename now, or wait?","parked_plan":{"breaks":["the 1.55 client"],"rollback":"revert the branch"},"gate_decisions":[{"phase":"publish","route":"escalate","trigger":"the diff is a breaking change","rationale":"a wire contract changed"},{"phase":"publish","route":"merge-it","rationale":"nonsense"}]}' --expect 200 --check gate_decisions len-eq 2 --check gate_decisions.1.unreadable eq true
+  control-automation api GET /v1/improve/parked --expect 200 --check total eq 1 --check cycles.0.parked_plan.rollback matches 'revert the branch'
+  control-automation api POST "/v1/improve/cycles/$PCID/resolve" --json '{"route":"escalate","resolution":"ask someone else"}' --expect 422
+  control-automation api POST "/v1/improve/cycles/$PCID/resolve" --json '{"route":"approve","resolution":"The client release is out; publish it."}' --expect 200 --check status eq REVIEWING --check resolution matches 'client release'
+  control-automation api POST "/v1/improve/cycles/$PCID/resolve" --json '{"route":"approve","resolution":"again"}' --expect 409
+  ```
+
+- **A deletion needs a signature that is not the author's (`F19.attest`, `F19.attest-not-the-author`, `F19.authority`, `F19.change-class`).**
+  Requires: `F19.create`
+  Requires: `F19.create`
+  ```sh
+  DCID=$(control-automation api POST "/v1/improve/$AID/claim" --expect 201 --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$DCID" --json '{"status":"REVIEWING","builder_runtime":"claude-code","change_class":"additive","change_evidence":{"reasons":[{"rule":"removed_export","path":"a.py","detail":"-def gone():"}]},"head_sha":"a1b2c3d","changed_files":["a.py"],"checks":[{"command":"pytest","passed":true}],"summary":"removed the unused resolver"}' --expect 200 --check change_class eq breaking --check claimed_change_class eq null
+  control-automation api GET "/v1/improve/cycles/$DCID/authority" --expect 200 --check authorised eq false --check human_only eq true --check route eq escalate
+  control-automation api PATCH "/v1/improve/cycles/$DCID" --json '{"change_class":"deleting","change_evidence":{"reasons":[{"rule":"file_deleted","path":"a.py","detail":"the whole file was removed"}]}}' --expect 200 --check change_class eq deleting
+  control-automation api GET "/v1/improve/cycles/$DCID/authority" --expect 200 --check authorised eq false --check missing.0 eq judge_attestation
+  control-automation api POST "/v1/improve/cycles/$DCID/attest" --json '{"attested":true,"runtime":"claude-code","summary":"looks dead","removals":[{"path":"a.py","finding":"dead","where":"grep returns only the definition"}]}' --expect 409
+  control-automation api POST "/v1/improve/cycles/$DCID/attest" --json '{"attested":true,"runtime":"codex","summary":"all fine"}' --expect 422
+  control-automation api POST "/v1/improve/cycles/$DCID/attest" --json '{"attested":true,"runtime":"codex","summary":"nothing imports it","removals":[{"path":"a.py","finding":"dead","where":"grep returns only the definition"}]}' --expect 200 --check judge_attestation.runtime eq codex
+  control-automation api GET "/v1/improve/cycles/$DCID/authority" --expect 200 --check authorised eq true --check reason matches codex
+  ```
+
+- **Evidence that was never produced is a proposal, not a merge (`F19.authority-evidence`).**
+  Requires: `F19.create`
+  ```sh
+  ECID=$(control-automation api POST "/v1/improve/$AID/claim" --expect 201 --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$ECID" --json '{"status":"REVIEWING","builder_runtime":"codex","change_class":"additive","head_sha":"b2c3d4e","changed_files":["b.py"],"summary":"added a thing"}' --expect 200
+  control-automation api GET "/v1/improve/cycles/$ECID/authority" --expect 200 --check authorised eq false --check missing.0 eq checks --check reason matches proposal
+  control-automation api PATCH "/v1/improve/cycles/$ECID" --json '{"checks":[{"command":"npm run lint","passed":false}]}' --expect 200
+  control-automation api GET "/v1/improve/cycles/$ECID/authority" --expect 200 --check route eq cycle --check reason matches 'did not pass'
+  ```
 
 ## Gotchas
 
