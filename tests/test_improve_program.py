@@ -183,6 +183,108 @@ class TestCreateProgram:
         assert response.status_code == 422
 
 
+class TestTheProgramsPackagedCode:
+    """A program runs the code it was packaged with, and must say which.
+
+    The runner is packaged once, when the program is created, so a preset fix
+    reaches only programs created afterwards. Nothing recorded which code a
+    program got, which made "this feature does not work for me" and "my
+    program predates the feature" the same observation — including for reading
+    the user's own corrections, which is meant to happen every cycle or not at
+    all.
+    """
+
+    async def test_a_new_program_is_running_current_code(self, async_client):
+        # Arrange / Act
+        program = await create_program(async_client)
+        response = await async_client.get(
+            f"/api/automation/v1/improve/{program['id']}/rotation"
+        )
+
+        # Assert
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["preset_code_is_current"] is True
+        assert body["preset_code_digest"] == body["service_preset_code_digest"]
+        assert body["preset_code_digest"].startswith("sha256:")
+
+    async def test_a_program_packaged_from_other_code_says_so(
+        self, async_client, async_session
+    ):
+        # Arrange: a program whose recorded digest is not this build's — which
+        # is every program created before the preset last changed.
+        program = await create_program(async_client)
+        automation = await async_session.get(Automation, uuid.UUID(program["id"]))
+        automation.preset_metadata = {
+            **automation.preset_metadata,
+            "preset_code_digest": "sha256:" + "0" * 64,
+        }
+        await async_session.commit()
+
+        # Act
+        response = await async_client.get(
+            f"/api/automation/v1/improve/{program['id']}/rotation"
+        )
+
+        # Assert: both sides reported, so the dashboard can show the pair
+        # rather than only an assertion.
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["preset_code_is_current"] is False
+        assert body["preset_code_digest"] == "sha256:" + "0" * 64
+        assert body["service_preset_code_digest"] != body["preset_code_digest"]
+
+    async def test_a_program_from_before_the_digest_existed_is_not_current(
+        self, async_client, async_session
+    ):
+        # No digest at all means packaged by a build that did not record one,
+        # which is strictly older than this one. Reporting it as current would
+        # hide exactly the case this exists for.
+        program = await create_program(async_client)
+        automation = await async_session.get(Automation, uuid.UUID(program["id"]))
+        automation.preset_metadata = {
+            key: value
+            for key, value in automation.preset_metadata.items()
+            if key != "preset_code_digest"
+        }
+        await async_session.commit()
+
+        response = await async_client.get(
+            f"/api/automation/v1/improve/{program['id']}/rotation"
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["preset_code_is_current"] is False
+        assert response.json()["preset_code_digest"] is None
+
+    async def test_refreshing_the_code_makes_it_current_again(
+        self, async_client, async_session
+    ):
+        # Arrange: the stale program from above.
+        program = await create_program(async_client)
+        automation = await async_session.get(Automation, uuid.UUID(program["id"]))
+        automation.preset_metadata = {
+            **automation.preset_metadata,
+            "preset_code_digest": "sha256:" + "0" * 64,
+        }
+        before = automation.tarball_path
+        await async_session.commit()
+
+        # Act
+        refresh = await async_client.post(
+            f"/api/automation/v1/improve/{program['id']}/refresh-code"
+        )
+        rotation = await async_client.get(
+            f"/api/automation/v1/improve/{program['id']}/rotation"
+        )
+
+        # Assert: new tarball, and the digest recorded with it — not left
+        # describing the code the program had before the call.
+        assert refresh.status_code == 200, refresh.text
+        assert refresh.json()["tarball_path"] != before
+        assert rotation.json()["preset_code_is_current"] is True
+
+
 class TestRotation:
     """Which repository a cycle takes, and what the dashboard promises."""
 

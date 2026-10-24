@@ -606,6 +606,7 @@ async def refresh_program_code(
         _build_storage_path,
         _bytes_to_async_iter,
         _generate_improve_tarball,
+        improve_preset_code_digest,
     )
 
     upload_id = uuid.uuid4()
@@ -639,6 +640,12 @@ async def refresh_program_code(
         ) from exc
 
     automation.tarball_path = build_internal_url(upload_id)
+    # Recorded with the tarball it describes, or the program would still
+    # report the code it had before this call.
+    automation.preset_metadata = {
+        **(automation.preset_metadata or {}),
+        "preset_code_digest": improve_preset_code_digest(),
+    }
     automation.updated_at = utcnow()
     await session.flush()
     await session.refresh(automation)
@@ -891,18 +898,40 @@ async def get_rotation(
     ``next_index`` is computed by the same function the claim uses, so what
     the dashboard promises is what the next run actually takes.
     """
-    _, config = await _load_program(session, automation_id, user)
+    automation, config = await _load_program(session, automation_id, user)
     repositories = await resolve_rotation(session, user.org_id, config)
     previous = await latest_cycle(session, automation_id)
     try:
         upcoming: int | None = next_index(repositories, previous)
     except NoRepositoriesError:
         upcoming = None
+
+    # Imported here for the reason the refresh endpoint does: `preset_router`
+    # imports this module's router.
+    from openhands.automation.preset_router import improve_preset_code_digest
+
+    packaged = (automation.preset_metadata or {}).get("preset_code_digest")
+    try:
+        current: str | None = improve_preset_code_digest()
+    except OSError as exc:
+        # The preset sources are not readable. That is not "the program is
+        # current": claiming either answer would be inventing one, so the
+        # comparison is reported as unavailable and the dashboard says nothing.
+        logger.warning("Could not digest the improve preset code: %s", exc)
+        current = None
+
     return RotationResponse(
         repositories=_rotation_entries(repositories),
         next_index=upcoming,
         last_cycle=CycleResponse.of(previous) if previous is not None else None,
         config=config,
+        preset_code_is_current=(
+            True
+            if current is None
+            else isinstance(packaged, str) and packaged == current
+        ),
+        preset_code_digest=packaged if isinstance(packaged, str) else None,
+        service_preset_code_digest=current,
     )
 
 

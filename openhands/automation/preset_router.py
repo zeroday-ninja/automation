@@ -12,6 +12,7 @@ Currently supported presets:
   runtime review it adversarially
 """
 
+import hashlib
 import io
 import json
 import logging
@@ -1180,6 +1181,30 @@ def _load_improve_preset_files() -> dict[str, str]:
     return _IMPROVE_PRESET_CACHE
 
 
+def improve_preset_code_digest() -> str:
+    """A digest of the code a program would be packaged from right now.
+
+    A program's runner is packaged once, when the program is created, so a
+    preset fix reaches only programs packaged afterwards. Nothing recorded
+    *which* code a program got, so a program quietly running a build from
+    before a feature existed was indistinguishable from one running the
+    current code -- and the features that go stale that way include reading
+    the user's own corrections, which is meant to happen every cycle or not at
+    all.
+
+    Over the file contents, not the tarball bytes: a tarball carries
+    timestamps, so two packagings of identical source would never match.
+    """
+    files = _load_improve_preset_files()
+    digest = hashlib.sha256()
+    for name in sorted(files):
+        digest.update(name.encode())
+        digest.update(b"\0")
+        digest.update(files[name].encode())
+        digest.update(b"\0")
+    return f"sha256:{digest.hexdigest()}"
+
+
 def _generate_improve_tarball() -> bytes:
     """Package the improvement-program runner.
 
@@ -1326,6 +1351,9 @@ async def create_improvement_program(
     preset_metadata: dict[str, Any] = {
         "preset_type": "improve",
         "improve": body.improve.to_metadata(),
+        # Which code this program was packaged from, so a later build can say
+        # whether it is still current rather than leaving the user to guess.
+        "preset_code_digest": improve_preset_code_digest(),
     }
 
     try:

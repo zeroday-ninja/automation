@@ -704,6 +704,18 @@ class RotationResponse(BaseModel):
     )
     last_cycle: CycleResponse | None = None
     config: ImproveProgramConfig
+    #: Whether the program's packaged runner is the code this service would
+    #: package now. A program's runner is packaged once, at creation, so a
+    #: preset fix reaches only programs created afterwards -- and nothing said
+    #: so, which made "this feature does not work for me" and "my program
+    #: predates the feature" the same observation. False for a program
+    #: packaged before the digest was recorded at all, which is strictly older.
+    preset_code_is_current: bool = True
+    #: What this program was packaged from, when that was recorded.
+    preset_code_digest: str | None = None
+    #: What the service would package now, so a client can show the pair
+    #: rather than only an assertion.
+    service_preset_code_digest: str | None = None
 
 
 class CycleListResponse(BaseModel):
