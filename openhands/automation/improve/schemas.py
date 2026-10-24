@@ -430,6 +430,41 @@ class BuilderShareResponse(BaseModel):
     within_target: bool | None = None
 
 
+class ProvenanceResponse(BaseModel):
+    """Whether published changes can be followed back to what produced them.
+
+    The plan's measure for the audit trail: "provenance resolves a merged
+    commit back to its prompt and sources for at least 95% of merged cycles,
+    with squash-merge misses falling back to the pull request and reported
+    rather than hidden". It had no meter, so the only way to answer it was to
+    read the rows by hand.
+    """
+
+    automation_id: uuid.UUID | None = None
+    window_days: int
+    since: UtcDatetime
+    merged: int
+    #: Reachable from the commit the change became, which is where a reader
+    #: holding a line of `git log` actually starts.
+    from_commit: int
+    #: Reachable only through the pull request, because the commit was not
+    #: recorded -- a squash merge rewrites it. A weaker answer, counted
+    #: separately so it cannot pass as the stronger one.
+    from_pull_request: int
+    #: Merged and leading nowhere.
+    unresolved: int
+    #: Which part the unresolved ones are missing, counted. A bare total says
+    #: the trail is broken; this says where.
+    missing: dict[str, int] = Field(default_factory=dict)
+    #: 0..1, or null when nothing merged -- which is not full coverage.
+    coverage: float | None = None
+    #: The plan's threshold, carried so a reader need not know it.
+    target_coverage: float = 0.95
+    #: Null, not False, when nothing merged: an unmet measure and an
+    #: unmeasurable one are different answers.
+    within_target: bool | None = None
+
+
 class AuthorityResponse(BaseModel):
     """Whether a change may publish, and what is standing in the way."""
 

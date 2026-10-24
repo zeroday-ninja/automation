@@ -54,6 +54,7 @@ from openhands.automation.improve.schemas import (
     CycleRepository,
     CycleResponse,
     HandoffResume,
+    ProvenanceResponse,
     ResolveCycleRequest,
     RotationResponse,
     RuntimeUsageEntry,
@@ -67,6 +68,7 @@ from openhands.automation.improve.usage import (
     evenness_gap,
     last_observation_of,
     observed_runtimes,
+    provenance_of_merged_cycles,
     record_observations,
     runtime_statuses,
 )
@@ -764,6 +766,49 @@ async def get_builder_share(
         ],
         evenness_gap=gap,
         within_target=within,
+    )
+
+
+@router.get("/provenance")
+async def get_provenance(
+    days: int = 30,
+    automation_id: uuid.UUID | None = None,
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session),
+) -> ProvenanceResponse:
+    """How many merged changes can be followed back to what produced them.
+
+    The audit trail exists to answer one question — somebody holding a commit
+    on a default branch asks what produced it — and until now the only way to
+    check whether it could was to read the rows by hand.
+
+    Only merged cycles count. A change that never landed has nothing for
+    anybody to find in a `git log`, and counting it would flatter the number
+    with work nobody has to audit.
+
+    A cycle whose merge commit was not recorded but whose pull request was is
+    counted separately rather than as a miss *or* as a full resolution. That
+    is the squash-merge case the plan asks to be reported rather than hidden:
+    the trail still leads back, by a longer route.
+    """
+    window = max(1, min(days, 365))
+    if automation_id is not None:
+        await _load_program(session, automation_id, user)
+    found, since = await provenance_of_merged_cycles(
+        session, user.org_id, days=window, automation_id=automation_id
+    )
+    coverage = found.coverage
+    return ProvenanceResponse(
+        automation_id=automation_id,
+        window_days=window,
+        since=since,
+        merged=found.merged,
+        from_commit=found.from_commit,
+        from_pull_request=found.from_pull_request,
+        unresolved=found.unresolved,
+        missing=found.missing,
+        coverage=None if coverage is None else round(coverage, 4),
+        within_target=None if coverage is None else coverage >= 0.95,
     )
 
 

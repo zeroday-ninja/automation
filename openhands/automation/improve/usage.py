@@ -404,3 +404,111 @@ async def builder_share(
     ]
     covered = 0 if earliest is None else max(1, (moment - earliest).days + 1)
     return shares, since, min(covered, days)
+
+
+@dataclass(frozen=True, slots=True)
+class Provenance:
+    """Whether a published change can be followed back to what produced it.
+
+    The plan's measure for the audit trail is that "provenance resolves a
+    merged commit back to its prompt and sources for at least 95% of merged
+    cycles, with squash-merge misses falling back to the pull request and
+    reported rather than hidden". All three parts matter: the commit is where
+    a reader *starts*, the prompt and the sources are what they are looking
+    for, and the fallback is a weaker answer that must be visible as one.
+    """
+
+    #: Merged, and reachable from the commit it became.
+    from_commit: int
+    #: Merged, but the commit was not recorded -- a squash merge rewrites it.
+    #: The pull request still leads back, which is the fallback the plan asks
+    #: to be reported rather than quietly counted as success.
+    from_pull_request: int
+    #: Merged and leading nowhere: no prompt, or nothing cited, or neither.
+    unresolved: int
+    #: Which part each unresolved cycle is missing, counted. A bare total says
+    #: the trail is broken; this says where.
+    missing: dict[str, int]
+
+    @property
+    def merged(self) -> int:
+        return self.from_commit + self.from_pull_request + self.unresolved
+
+    @property
+    def coverage(self) -> float | None:
+        """0..1, or None when nothing merged -- which is not full coverage."""
+        if self.merged == 0:
+            return None
+        return (self.from_commit + self.from_pull_request) / self.merged
+
+
+async def provenance_of_merged_cycles(
+    session: AsyncSession,
+    org_id: uuid.UUID,
+    *,
+    days: int,
+    automation_id: uuid.UUID | None = None,
+    now: datetime | None = None,
+) -> tuple[Provenance, datetime]:
+    """How many merged changes can be followed back to what produced them.
+
+    Only merged cycles count. A change that never landed has nothing for
+    anybody to find in a `git log` and asking it to be traceable would
+    flatter the number with work nobody has to audit.
+    """
+    moment = now or datetime.now(UTC)
+    since = moment - timedelta(days=days)
+    rows = (
+        await session.execute(
+            select(
+                AutomationImproveCycle.merge_commit_sha,
+                AutomationImproveCycle.merged_at,
+                AutomationImproveCycle.pr_url,
+                AutomationImproveCycle.prompt_digest,
+                AutomationImproveCycle.sources,
+            ).where(
+                AutomationImproveCycle.org_id == org_id,
+                AutomationImproveCycle.created_at >= since,
+                AutomationImproveCycle.merged_at.is_not(None),
+                *(
+                    [AutomationImproveCycle.automation_id == automation_id]
+                    if automation_id is not None
+                    else []
+                ),
+            )
+        )
+    ).all()
+
+    from_commit = 0
+    from_pull_request = 0
+    unresolved = 0
+    missing: dict[str, int] = {}
+    for sha, _merged_at, pr_url, digest, sources in rows:
+        gaps = []
+        if not digest:
+            gaps.append("prompt_digest")
+        if not sources:
+            gaps.append("sources")
+        if gaps:
+            unresolved += 1
+            for gap in gaps:
+                missing[gap] = missing.get(gap, 0) + 1
+            continue
+        if sha:
+            from_commit += 1
+        elif pr_url:
+            from_pull_request += 1
+        else:
+            # Merged, with its prompt and sources, and no way back to either:
+            # neither the commit nor the pull request was recorded.
+            unresolved += 1
+            missing["merge_commit_sha"] = missing.get("merge_commit_sha", 0) + 1
+    return (
+        Provenance(
+            from_commit=from_commit,
+            from_pull_request=from_pull_request,
+            unresolved=unresolved,
+            missing=missing,
+        ),
+        since,
+    )
