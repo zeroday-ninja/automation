@@ -28,9 +28,7 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     with op.batch_alter_table("automation_improve_cycle") as batch:
         batch.add_column(sa.Column("handoff", sa.JSON(), nullable=True))
-        batch.add_column(
-            sa.Column("resumed_from_cycle_id", sa.Uuid(), nullable=True)
-        )
+        batch.add_column(sa.Column("resumed_from_cycle_id", sa.Uuid(), nullable=True))
         batch.add_column(sa.Column("resumed_by_cycle_id", sa.Uuid(), nullable=True))
     op.create_index(
         "ix_automation_improve_cycle_resumed_by",
