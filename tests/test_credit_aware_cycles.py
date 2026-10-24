@@ -419,3 +419,94 @@ async def test_exactly_one_cycle_picks_up_a_handoff(async_session) -> None:
     assert second.resumed_from_cycle_id is None
     await async_session.refresh(abandoned)
     assert abandoned.resumed_by_cycle_id == first.id
+
+
+class TestReadingTheLedger:
+    """GET /v1/improve/runtime-usage — what a person asking "what is spent" gets.
+
+    The ledger existed from the start and nothing could read it: it was
+    written by cycles and read only by the claim, against the runtimes one
+    program happens to be configured with. A person has no such list.
+    """
+
+    USAGE = "/api/automation/v1/improve/runtime-usage"
+
+    async def test_a_ledger_nobody_has_written_to_is_empty_not_wrong(
+        self, async_client
+    ):
+        response = await async_client.get(self.USAGE)
+
+        assert response.status_code == 200, response.text
+        assert response.json() == {"runtimes": [], "earliest_reset": None}
+
+    async def test_an_exhaustion_comes_back_with_its_evidence(
+        self, async_client, async_session
+    ):
+        # Arrange: what a cycle reports when a runtime refuses.
+        await record_observations(
+            async_session,
+            ORG_ID,
+            [
+                RuntimeObservation(
+                    runtime="claude-code",
+                    outcome="exhausted",
+                    observed_at=datetime.now(UTC),
+                    reset_at=datetime.now(UTC) + timedelta(hours=5),
+                    reset_source="resets 3pm (America/New_York)",
+                    evidence="You've hit your limit",
+                    conversation_id="conv-1",
+                ),
+                RuntimeObservation(
+                    runtime="codex",
+                    outcome="ok",
+                    observed_at=datetime.now(UTC),
+                ),
+            ],
+        )
+        await async_session.commit()
+
+        # Act
+        response = await async_client.get(self.USAGE)
+
+        # Assert: a reader deciding whether to trust an exhaustion needs what
+        # was seen, not only the conclusion.
+        assert response.status_code == 200, response.text
+        body = response.json()
+        by_runtime = {entry["runtime"]: entry for entry in body["runtimes"]}
+        spent = by_runtime["claude-code"]
+        assert spent["available"] is False
+        assert spent["state"] == "EXHAUSTED"
+        assert spent["last_observation"]["evidence"] == "You've hit your limit"
+        assert spent["reset_source"] == "resets 3pm (America/New_York)"
+        assert spent["consecutive_exhaustions"] == 1
+        assert by_runtime["codex"]["available"] is True
+        # So a caller can say "nothing until then" rather than making the
+        # reader compare timestamps.
+        assert body["earliest_reset"] == spent["reset_at"]
+
+    async def test_a_reset_that_has_passed_reads_as_available(
+        self, async_client, async_session
+    ):
+        # Recovery is derived at read time, so a restart cannot drop the
+        # transition and nothing has to be scheduled to flip it.
+        await record_observations(
+            async_session,
+            ORG_ID,
+            [
+                RuntimeObservation(
+                    runtime="claude-code",
+                    outcome="exhausted",
+                    observed_at=datetime.now(UTC) - timedelta(hours=9),
+                    reset_at=datetime.now(UTC) - timedelta(hours=1),
+                )
+            ],
+        )
+        await async_session.commit()
+
+        response = await async_client.get(self.USAGE)
+
+        entry = response.json()["runtimes"][0]
+        assert entry["available"] is True
+        assert entry["reset_at"] is None
+        # The exhaustion itself is still on the record: it happened.
+        assert entry["last_exhausted_at"] is not None

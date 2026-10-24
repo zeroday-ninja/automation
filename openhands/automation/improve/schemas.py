@@ -337,6 +337,41 @@ class UpdateCycleRequest(BaseModel):
         return v
 
 
+class RuntimeUsageEntry(BaseModel):
+    """One runtime's remaining usage, and the evidence behind that reading."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    runtime: str
+    #: ``unknown`` for a runtime observed but never resolved either way. Kept
+    #: distinct from ``available``: nothing having gone wrong is not the same
+    #: as something having gone right.
+    state: str
+    available: bool
+    reset_at: UtcDatetime | None = None
+    cycles_attempted: int = 0
+    cycles_completed: int = 0
+    #: What was last seen, in the runtime's own words where it said anything.
+    last_observation: dict[str, Any] | None = None
+    last_exhausted_at: UtcDatetime | None = None
+    last_success_at: UtcDatetime | None = None
+    #: How many times running it has refused in a row. A rising count is the
+    #: signal that a reset estimate is wrong rather than early.
+    consecutive_exhaustions: int = 0
+    #: Where the reset time came from: the runtime's own notice, or a default
+    #: cooldown because it gave none.
+    reset_source: str | None = None
+
+
+class RuntimeUsageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    runtimes: list[RuntimeUsageEntry]
+    #: When the first exhausted runtime is expected back, so a caller can say
+    #: "nothing until then" rather than making the reader compare timestamps.
+    earliest_reset: UtcDatetime | None = None
+
+
 class AuthorityResponse(BaseModel):
     """Whether a change may publish, and what is standing in the way."""
 
