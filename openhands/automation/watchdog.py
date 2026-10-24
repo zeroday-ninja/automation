@@ -41,8 +41,10 @@ from openhands.automation.backends.local import local_runs_root
 from openhands.automation.config import Settings, get_config
 from openhands.automation.models import (
     Automation,
+    AutomationImproveCycle,
     AutomationRun,
     AutomationRunStatus,
+    ImproveCycleStatus,
     IntegrationEvent,
 )
 from openhands.automation.telemetry import capture_automation_event
@@ -1025,6 +1027,97 @@ async def cleanup_due_sandboxes(
     return cleaned
 
 
+#: Statuses a cycle never leaves on its own.
+_TERMINAL_CYCLE_STATUSES: Final = (
+    ImproveCycleStatus.COMPLETED,
+    ImproveCycleStatus.FAILED,
+)
+
+
+async def reap_abandoned_cycles(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> int:
+    """Close improvement cycles whose run is over and which nobody finished.
+
+    A cycle is claimed before any agent starts and reported when it ends, so
+    a sandbox that dies in between leaves a row that says work is still in
+    progress — forever. Nothing closed those until now: the dashboard polls
+    them without end, and a graph of what the agents are doing shows work that
+    stopped days ago. One such node teaches a reader to distrust the whole
+    view, which is why this runs in the janitor rather than being a follow-up.
+
+    Two cases, and the second is the one that is easy to miss:
+
+    - the cycle's run reached a terminal status, so the work is definitely
+      over;
+    - the cycle's run is *gone*. Runs are pruned and the link is
+      ``ON DELETE SET NULL``, so pruning erases the very evidence that would
+      condemn the cycle. Those are reaped on age instead, bounded by the
+      automation's own resolved timeout rather than a constant, so a
+      legitimately long cycle is never killed for taking the time it was
+      given.
+
+    A reaped cycle is marked as such and left without a verdict. It is an
+    absence of evidence, not a judgement, and colouring it like a reported
+    failure would be a lie about what is known.
+    """
+    sandbox_cfg = get_config().sandbox
+    # The widest a run could legitimately still be going: provisioning, the
+    # longest timeout any automation may be given, and the grace the rest of
+    # the watchdog already allows. Bounded by configuration rather than a
+    # constant, so a program the user gave five hours is never cut short.
+    margin = timedelta(
+        seconds=sandbox_cfg.sandbox_ready_timeout
+        + sandbox_cfg.max_run_duration
+        + sandbox_cfg.run_timeout_hard_grace
+    )
+    cutoff = datetime.now(UTC) - margin
+    reaped = 0
+
+    async with session_factory() as session:
+        stale = (
+            await session.execute(
+                select(AutomationImproveCycle, AutomationRun.status)
+                .outerjoin(
+                    AutomationRun,
+                    AutomationRun.id == AutomationImproveCycle.run_id,
+                )
+                .where(
+                    AutomationImproveCycle.status.notin_(_TERMINAL_CYCLE_STATUSES),
+                    AutomationImproveCycle.reaped.is_(False),
+                )
+            )
+        ).all()
+
+        for cycle, run_status in stale:
+            if run_status is not None:
+                over = run_status not in (
+                    AutomationRunStatus.PENDING,
+                    AutomationRunStatus.RUNNING,
+                )
+                reason = f"its run ended as {run_status.value}"
+            else:
+                updated = cycle.updated_at
+                if updated.tzinfo is None:
+                    updated = updated.replace(tzinfo=UTC)
+                over = updated < cutoff
+                reason = "its run is gone and nothing has reported since"
+            if not over:
+                continue
+            cycle.status = ImproveCycleStatus.FAILED
+            cycle.reaped = True
+            cycle.completed_at = datetime.now(UTC)
+            cycle.updated_at = datetime.now(UTC)
+            # Stated, not implied: the next reader has to be able to tell
+            # "nobody reported" from "a reviewer said no".
+            cycle.error = f"Closed by the janitor: {reason}."
+            reaped += 1
+
+        if reaped:
+            await session.commit()
+    return reaped
+
+
 async def watchdog_loop(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
@@ -1056,6 +1149,13 @@ async def watchdog_loop(
                 logger.info("Processed %d stale run(s)", marked)
         except Exception:
             logger.exception("Error in watchdog scan")
+
+        try:
+            abandoned = await reap_abandoned_cycles(session_factory)
+            if abandoned:
+                logger.info("Closed %d abandoned improvement cycle(s)", abandoned)
+        except Exception:
+            logger.exception("Error reaping abandoned improvement cycles")
 
         try:
             pruned = await prune_integration_events(session_factory, settings)

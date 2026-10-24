@@ -183,3 +183,55 @@ def test_a_repository_identity_set_is_read_whole(preset, tmp_path) -> None:
     assert "A watcher for pairs." in section
     assert "Functions stay short." in section
     assert "the GIL won" in section
+
+
+def test_checks_are_recorded_however_an_agent_writes_them(preset) -> None:
+    # Arrange: the three shapes agents actually produce.
+    raw = [
+        "npm run lint",
+        {"command": "npm test", "result": "passed", "detail": "412 passed"},
+        {"name": "npm run build", "passed": False},
+        {"note": "no command here"},
+    ]
+
+    # Act
+    checks = preset.normalize_checks(raw)
+
+    # Assert: a check recorded loosely is still evidence; one with no command
+    # is not a check at all.
+    assert [check["command"] for check in checks] == [
+        "npm run lint",
+        "npm test",
+        "npm run build",
+    ]
+    assert checks[0]["passed"] is None
+    assert checks[1]["passed"] is True
+    assert checks[2]["passed"] is False
+
+
+def test_an_unreadable_check_outcome_is_not_recorded_as_a_failure(preset) -> None:
+    # Arrange
+    raw = [{"command": "pytest -q", "result": "12 passed, 3 skipped"}]
+
+    # Act
+    checks = preset.normalize_checks(raw)
+
+    # Assert: absent is not the same as failed, and guessing would put a red
+    # mark against a command that did its job.
+    assert checks[0]["passed"] is None
+    assert "12 passed" in checks[0]["detail"]
+
+
+def test_a_prompt_digest_identifies_the_instructions_without_storing_them(
+    preset,
+) -> None:
+    # Act
+    first = preset.prompt_digest("improve the retry policy")
+    again = preset.prompt_digest("improve the retry policy")
+    other = preset.prompt_digest("improve the retry policy.")
+
+    # Assert: stable, and it does not carry the prompt — which embeds the
+    # user's identity and the repository's.
+    assert first == again
+    assert first != other
+    assert "retry" not in first
