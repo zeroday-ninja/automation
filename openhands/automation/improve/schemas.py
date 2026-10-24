@@ -3,7 +3,13 @@
 import uuid
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from openhands.automation.improve.config import ImproveProgramConfig
 from openhands.automation.improve.routing import ROUTES, normalize_route
@@ -321,6 +327,114 @@ class UpdateCycleRequest(BaseModel):
         return v
 
 
+class AuthorityResponse(BaseModel):
+    """Whether a change may publish, and what is standing in the way."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cycle_id: uuid.UUID
+    change_class: str | None
+    authorised: bool
+    route: str
+    reason: str
+    missing: list[str] = Field(default_factory=list)
+    human_only: bool = Field(
+        default=False,
+        description=(
+            "True when no caller can ever be authorised, however complete the "
+            "evidence -- kept distinct from 'not yet', because one is a wait "
+            "and the other is a different act by a different person."
+        ),
+    )
+
+
+class AttestedRemoval(BaseModel):
+    """One removal the judge looked at, and what it found."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(..., max_length=500)
+    symbol: str | None = Field(default=None, max_length=200)
+    finding: str = Field(
+        ...,
+        description=(
+            "'dead' (nothing called it), 'replaced' (something else does the "
+            "job now) or 'covered' (a test or caller proves the behaviour "
+            "survives). Anything else is not an attestation."
+        ),
+    )
+    where: str = Field(
+        ...,
+        min_length=1,
+        max_length=1000,
+        description=(
+            "Where the finding can be checked -- the search that came back "
+            "empty, the replacement, the test. An attestation with no 'where' "
+            "is an assertion."
+        ),
+    )
+
+    @field_validator("finding")
+    @classmethod
+    def _one_of_three(cls, value: str) -> str:
+        folded = value.strip().casefold()
+        if folded not in ("dead", "replaced", "covered"):
+            raise ValueError(
+                f"{value!r} is not a finding; expected dead, replaced or covered"
+            )
+        return folded
+
+
+class AttestCycleRequest(BaseModel):
+    """The judge's verdict on a cycle's removals."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    attested: bool = Field(
+        ...,
+        description=(
+            "Whether every removal in this change is accounted for. False is "
+            "a legitimate answer and sends the work back round; it is not an "
+            "error."
+        ),
+    )
+    runtime: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description=(
+            "The runtime that judged it. Checked against the builder's: a "
+            "model favours its own output, so the signer is never the author."
+        ),
+    )
+    summary: str = Field(
+        ...,
+        min_length=1,
+        max_length=4000,
+        description="Why, in the judge's own words. Required either way.",
+    )
+    removals: list[AttestedRemoval] = Field(
+        default_factory=list,
+        max_length=200,
+        description=(
+            "Each removal and what was found about it. Required when "
+            "`attested` is true: attesting a set of removals without naming "
+            "them is attesting nothing."
+        ),
+    )
+    profile_id: uuid.UUID | None = None
+    conversation_id: str | None = Field(default=None, max_length=100)
+
+    @model_validator(mode="after")
+    def _attesting_means_naming(self) -> "AttestCycleRequest":
+        if self.attested and not self.removals:
+            raise ValueError(
+                "attested=true needs at least one removal: signing off a set "
+                "of removals without naming them is signing off nothing"
+            )
+        return self
+
+
 class ResolveCycleRequest(BaseModel):
     """A person's answer to what a parked cycle is waiting for."""
 
@@ -379,6 +493,7 @@ class CycleResponse(BaseModel):
     claimed_change_class: str | None = None
     change_evidence: dict[str, Any] | None = None
     gate_decisions: list[dict[str, Any]] | None = None
+    judge_attestation: dict[str, Any] | None = None
     parked_phase: str | None = None
     parked_question: str | None = None
     parked_plan: dict[str, Any] | None = None
@@ -431,6 +546,7 @@ class CycleResponse(BaseModel):
             claimed_change_class=cycle.claimed_change_class,
             change_evidence=cycle.change_evidence,
             gate_decisions=cycle.gate_decisions,
+            judge_attestation=cycle.judge_attestation,
             parked_phase=cycle.parked_phase,
             parked_question=cycle.parked_question,
             parked_plan=cycle.parked_plan,
