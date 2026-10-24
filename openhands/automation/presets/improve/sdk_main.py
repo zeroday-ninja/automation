@@ -775,12 +775,19 @@ def execute_cycle(workspace) -> None:
         f"({repository['index'] + 1} of {len(rotation)})"
     )
 
-    def report_cycle(payload: dict) -> None:
-        """Record cycle progress. Never fatal: the work matters more."""
+    def report_cycle(payload: dict) -> str | None:
+        """Record cycle progress. Never fatal: the work matters more.
+
+        Returns the rejection, or None when the service took it, so a caller
+        whose payload *is* the record can do something about being refused.
+        """
         try:
             cycle_request("PATCH", f"/v1/improve/cycles/{cycle_id}", payload)
         except Exception as exc:
-            print(f"  cycle update failed (non-fatal): {exc}")
+            detail = f"{type(exc).__name__}: {exc}"
+            print(f"  cycle update failed (non-fatal): {detail}")
+            return detail
+        return None
 
     try:
         # --- Clone the repository ------------------------------------------
@@ -1483,7 +1490,29 @@ def execute_cycle(workspace) -> None:
             final_update["soul_suggestions"] = normalize_soul_suggestions(
                 soul_suggestions
             )
-        report_cycle(final_update)
+        rejection = report_cycle(final_update)
+        if rejection:
+            # This report is the record, not progress. Left unrecorded the
+            # cycle stays mid-flight until the janitor closes it as an
+            # abandonment — which says the work failed when it was built,
+            # reviewed and published. Land the terminal state with the
+            # rejection named, carrying only the fields that cannot be its
+            # cause.
+            if report_cycle(
+                {
+                    "status": "COMPLETED",
+                    "verdict": verdict,
+                    "error": clamp(
+                        "The cycle finished, but the service rejected its "
+                        f"full report, so the detail is lost: {rejection}",
+                        MAX_SUMMARY_CHARS,
+                    ),
+                }
+            ):
+                print(
+                    "  WARNING: this cycle cannot be recorded at all; the "
+                    "janitor will close it as abandoned"
+                )
         report_phase(
             f"{repo_label}: cycle complete"
             + (" and merged" if merged and merged["merged"] else "")
