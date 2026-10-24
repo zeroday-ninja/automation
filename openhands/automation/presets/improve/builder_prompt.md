@@ -78,6 +78,11 @@ cycle. Report it with the sources and change nothing.
   heavy run going in the background.
 - Keep the change to the one improvement. If you find other problems, write
   them down for the report instead of fixing them.
+- If you tried an approach and rejected it, add a dated entry saying so, and
+  why, to `.openhands/identity/MEMORY.md` — creating the file if the project
+  has none. That file is the only thing stopping the next cycle spending its
+  whole budget rediscovering the dead end you just left. Write what you tried,
+  what happened, and what you would need for it to work.
 
 ## Step 5 — Publish it for review
 
