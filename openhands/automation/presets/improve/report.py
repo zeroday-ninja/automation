@@ -342,3 +342,40 @@ def changeover_plan(report: dict, reasons: list | None, branch: str) -> dict:
             "the fallback, which only works while nothing depends on it yet."
         )
     return plan
+
+
+#: What each claim refusal means, in words a reader can act on.
+#:
+#: Keyed by the service's own typed code rather than matched against its prose,
+#: so rewording a message cannot silently turn a known reason back into
+#: "something went wrong". Only the codes the service actually sends: a phrase
+#: for a code never emitted reads as coverage this does not have.
+CLAIM_REFUSALS = {
+    "no_repositories": "No repositories configured",
+    "all_repositories_capped": "Every repository has reached its daily cap",
+    "daily_ceiling_reached": "The service's daily cycle ceiling is reached",
+}
+
+
+def claim_refusal_phase(detail: dict | None, text: str = "") -> str:
+    """Why the claim refused, for the phase a person reads.
+
+    The run used to report "No repositories configured" whatever the reason,
+    which sends somebody to add a repository when the truth is "wait until
+    midnight". The service answers with a typed code precisely so this does
+    not have to guess.
+
+    A code this build has not seen is reported *as itself*: a reason nobody
+    enumerated is still a reason, and flattening it would be the exact defect
+    this function exists to fix.
+    """
+    code = (detail or {}).get("code")
+    if not code:
+        # An older service answers with prose. Carried through rather than
+        # replaced, because its words are all the information there is.
+        stripped = (text or "").strip()
+        return f"Nothing to claim: {stripped[:120]}" if stripped else "Nothing to claim"
+    phrase = CLAIM_REFUSALS.get(code, f"Nothing to claim: {code}")
+    resumes_at = (detail or {}).get("resumes_at")
+    # "Wait" is only actionable with an "until when".
+    return f"{phrase} (resumes {resumes_at})" if resumes_at else phrase

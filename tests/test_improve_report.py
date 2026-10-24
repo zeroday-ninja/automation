@@ -345,3 +345,45 @@ class TestChangeoverPlan:
         plan = report.changeover_plan({}, None, "improve/20261024")
 
         assert plan["breaks"] == ["the diff could not be read"]
+
+
+class TestClaimRefusalPhase:
+    """Why the claim refused, in the phase a person reads.
+
+    The service answers a refused claim with a typed code so this does not
+    have to guess — and until now the run reported "No repositories
+    configured" whatever the reason, which sends somebody to add a repository
+    when the truth is "wait until midnight".
+    """
+
+    def test_each_typed_reason_says_what_it_is(self, report):
+        cases = {
+            "no_repositories": "No repositories configured",
+            "all_repositories_capped": ("Every repository has reached its daily cap"),
+            "daily_ceiling_reached": ("The service's daily cycle ceiling is reached"),
+        }
+        for code, expected in cases.items():
+            assert report.claim_refusal_phase({"code": code}) == expected
+
+    def test_a_cap_carries_when_it_lifts(self, report):
+        phrase = report.claim_refusal_phase(
+            {
+                "code": "all_repositories_capped",
+                "resumes_at": "2026-10-25T00:00:00+00:00",
+            }
+        )
+
+        # "Wait" is only actionable with an "until when".
+        assert "resumes 2026-10-25T00:00:00+00:00" in phrase
+
+    def test_a_reason_this_build_has_not_seen_is_reported_as_itself(self, report):
+        # Flattening it would be the exact defect this function exists to fix.
+        assert "something_new" in report.claim_refusal_phase({"code": "something_new"})
+
+    def test_an_older_service_answering_prose_is_carried_through(self, report):
+        phrase = report.claim_refusal_phase(None, "Not an improvement program")
+
+        assert "Not an improvement program" in phrase
+
+    def test_a_refusal_with_nothing_in_it_still_says_something(self, report):
+        assert report.claim_refusal_phase(None, "") == "Nothing to claim"

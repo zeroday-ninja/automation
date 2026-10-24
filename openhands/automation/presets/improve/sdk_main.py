@@ -146,6 +146,7 @@ from report import (  # noqa: E402
     choose_reviewers,
     clamp,
     changeover_plan,
+    claim_refusal_phase,
     normalize_removals,
     normalize_sources,
     normalize_soul_suggestions,
@@ -354,6 +355,25 @@ def fetch_lessons(repo_label: str, remote_id: str | None, runtime: str | None) -
     return scoped, [str(item.get("id")) for item in scoped if item.get("id")]
 
 
+#: What each claim refusal means, in the words a reader can act on.
+#:
+#: Keyed by the service's own typed code rather than matched against its
+#: prose, so rewording a message cannot silently turn a known reason back
+#: into "something went wrong".
+def refusal_of(response) -> tuple:
+    """A refusal response as `(detail, text)`, which is all the phrasing needs.
+
+    Split from the phrasing so the phrasing can be tested: this module runs on
+    import and cannot be imported by a test, while `report.py` can.
+    """
+    try:
+        detail = (response.json() or {}).get("detail")
+    except Exception as exc:
+        print(f"  could not read the refusal body: {exc}")
+        detail = None
+    return detail if isinstance(detail, dict) else None, response.text or ""
+
+
 def gate(
     phase: str,
     route: str,
@@ -392,7 +412,8 @@ def removals_section(assessment) -> str:
     lines = [
         f"- `{reason.path}`: {reason.detail}"
         for reason in assessment.reasons
-        if reason.rule in ("removed_export", "file_deleted", "deletions_above_threshold")
+        if reason.rule
+        in ("removed_export", "file_deleted", "deletions_above_threshold")
     ]
     if assessment.removed_exports:
         lines.append(
@@ -731,11 +752,13 @@ def execute_cycle(workspace) -> None:
         )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 409:
-            # Nothing to rotate over, or this automation is not a program.
-            # Either way the run has nothing to do and saying so plainly beats
-            # failing with a stack trace.
+            # Nothing to claim. The run has nothing to do either way, but
+            # *why* is the whole difference between "add a repository",
+            # "wait until midnight" and "every runtime is spent" — and this
+            # phase is the only place a reader sees it. The service answers
+            # with a typed code precisely so this does not have to guess.
             print(f"  nothing to do: {exc.response.text}")
-            report_phase("No repositories configured")
+            report_phase(claim_refusal_phase(*refusal_of(exc.response)))
             return
         raise
 
@@ -1317,9 +1340,7 @@ def execute_cycle(workspace) -> None:
                         "runtime": judge_ran or "unknown",
                         "summary": clamp(verdict_report.get("summary"))
                         or "The judge recorded no reasoning.",
-                        "removals": normalize_removals(
-                            verdict_report.get("removals")
-                        ),
+                        "removals": normalize_removals(verdict_report.get("removals")),
                         "profile_id": str(judge_id),
                         "conversation_id": judge_conversation_id,
                     }
@@ -1380,9 +1401,7 @@ def execute_cycle(workspace) -> None:
                 or "the service gave no reason",
                 verdict=verdict,
                 change_class=computed_class,
-                recommends=(
-                    "merge" if authority.get("authorised") else "wait"
-                ),
+                recommends=("merge" if authority.get("authorised") else "wait"),
                 decided_by="service",
             )
         )
