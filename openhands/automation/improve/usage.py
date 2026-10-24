@@ -319,17 +319,27 @@ class BuilderShare:
     share: float
 
 
-def evenness_gap(shares: list[BuilderShare]) -> float | None:
+def evenness_gap(
+    shares: list[BuilderShare], *, expected_runtimes: int | None = None
+) -> float | None:
     """How far the widest share is from an even split, in percentage points.
 
     The gap, not the variance: the question is whether any one runtime is
     doing too much of the work, and a single runtime at 60% is the failure
     whatever the others are doing. ``None`` when nothing has been built, which
     is not a gap of zero -- it is no measurement at all.
+
+    ``expected_runtimes`` is what makes "even" mean what the plan means by it.
+    Measured against only the runtimes that *appear*, a program configured to
+    rotate three and quietly using two reads as a perfect split -- which is
+    the exact failure the rotation was built to fix, scored as a pass. The
+    denominator is the larger of the two, so a configured runtime that never
+    built widens the gap by its own absence, and a runtime that built without
+    being configured still counts.
     """
     if not shares:
         return None
-    even = 1.0 / len(shares)
+    even = 1.0 / max(len(shares), expected_runtimes or 0, 1)
     return round(max(abs(entry.share - even) for entry in shares) * 100, 1)
 
 
@@ -338,6 +348,7 @@ async def builder_share(
     org_id: uuid.UUID,
     *,
     days: int,
+    automation_id: uuid.UUID | None = None,
     now: datetime | None = None,
 ) -> tuple[list[BuilderShare], datetime, int]:
     """Who built the cycles of the last ``days``, and what fraction each did.
@@ -347,6 +358,11 @@ async def builder_share(
     of record on a cycle is the one that *actually ran* -- a cycle that failed
     over mid-change belongs to whichever runtime finished it, which is the
     only reading a share-of-work measurement can use.
+
+    ``automation_id`` scopes it to one program. Unscoped, the answer covers
+    every program in the org -- including disabled ones and any test harness
+    -- which is the right answer to "what has this machine been running" and
+    the wrong one to "is this program's rotation working".
 
     Returns the shares, the start of the window, and how many days of history
     actually exist inside it. The last of those matters: "even over a week"
@@ -364,6 +380,11 @@ async def builder_share(
                 AutomationImproveCycle.org_id == org_id,
                 AutomationImproveCycle.created_at >= since,
                 AutomationImproveCycle.builder_runtime.is_not(None),
+                *(
+                    [AutomationImproveCycle.automation_id == automation_id]
+                    if automation_id is not None
+                    else []
+                ),
             )
         )
     ).all()
