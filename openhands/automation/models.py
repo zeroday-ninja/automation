@@ -1315,6 +1315,15 @@ class AutomationImproveCycle(Base):
     # such path at all, which is why this is the highest-value column here.
     base_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     head_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Whether the change actually landed, and as which commit. The gate log
+    # records that the publish gate approved, which is a decision, not an
+    # outcome: a merge can be approved and still fail. Counting merged cycles,
+    # or following one to the commit on the default branch, must not mean
+    # parsing git's output back out of a rationale sentence.
+    merged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    merge_commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # Files the builder says it changed, the checks it ran with their
     # results, what it deliberately did not do, and the weakest part of its

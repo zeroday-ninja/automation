@@ -24,9 +24,10 @@ pieces specific to this preset are:
   AUTOMATION_AGENT_PROFILE_ID   - ignored: the program names its own profiles
 """
 
+import json
 import os
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 import sys
 import time
 import uuid
@@ -153,7 +154,6 @@ from report import (  # noqa: E402
     normalize_verdict,
     read_json_report,
     string_list,
-    worst_verdict,
 )
 
 
@@ -215,7 +215,7 @@ MAX_OBSERVATIONS = 20
 
 def _now_iso() -> str:
     """This moment, as the service's schemas expect it."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def conversation_events(workspace, conversation_id: str | None) -> list[dict] | None:
@@ -444,6 +444,39 @@ def cycle_authority(cycle_id: str) -> dict:
         }
 
 
+def merge_outcome(repo_path: str, pr_url: str) -> dict:
+    """Ask the forge what the merge produced.
+
+    Not read out of `gh pr merge`'s output, which reports the local
+    fast-forward of the checkout and not the commit the forge created. An
+    answer it cannot give is left absent rather than guessed.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", pr_url, "--json", "state,mergedAt,mergeCommit"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            print(f"  merge outcome unreadable: {result.stderr.strip()[:200]}")
+            return {}
+        data = json.loads(result.stdout)
+    except Exception as exc:
+        print(f"  merge outcome unreadable: {type(exc).__name__}: {exc}")
+        return {}
+    if data.get("state") != "MERGED":
+        return {}
+    outcome = {}
+    if data.get("mergedAt"):
+        outcome["merged_at"] = data["mergedAt"]
+    sha = (data.get("mergeCommit") or {}).get("oid")
+    if sha:
+        outcome["merge_commit_sha"] = sha[:64]
+    return outcome
+
+
 def merge_pull_request(repo_path: str, pr_url: str) -> dict:
     """Merge an authorised pull request, and say what happened either way."""
     try:
@@ -458,7 +491,9 @@ def merge_pull_request(repo_path: str, pr_url: str) -> dict:
         return {"merged": False, "detail": f"{type(exc).__name__}: {exc}"[:300]}
     if result.returncode != 0:
         return {"merged": False, "detail": result.stderr.strip()[:300]}
-    return {"merged": True, "detail": result.stdout.strip()[:300]}
+    merged = {"merged": True, "detail": result.stdout.strip()[:300]}
+    merged.update(merge_outcome(repo_path, pr_url))
+    return merged
 
 
 def _no_updates_answer(error: str | None) -> str | None:
@@ -684,11 +719,14 @@ def write_handoff(
     branch: str,
     base_ref: str,
     builder_id,
-    builder_runtime: str,
     cycle_dir: str,
     repo_label: str,
 ) -> dict | None:
     """Spend what is left of a runtime recording where it got to.
+
+    The runtime that wrote it is not passed in: the service stamps the handoff
+    with the cycle's own `builder_runtime`, which the same report updates to
+    whichever one actually ran, so a second source here could only disagree.
 
     Asks the runtime that just refused, because it is the only thing that
     knows what it was doing — and if it has nothing left to answer with, this
@@ -975,7 +1013,6 @@ def execute_cycle(workspace) -> None:
                 branch=branch,
                 base_ref=base_ref,
                 builder_id=builder_id,
-                builder_runtime=builder_runtime,
                 cycle_dir=cycle_dir,
                 repo_label=repo_label,
             )
@@ -1368,7 +1405,8 @@ def execute_cycle(workspace) -> None:
                             attestation,
                         )
                         print(
-                            f"  judge: {'attested' if attestation['attested'] else 'refused'}"
+                            "  judge: "
+                            + ("attested" if attestation["attested"] else "refused")
                         )
                     except Exception as exc:
                         print(f"  WARNING: the attestation was refused: {exc}")
@@ -1490,6 +1528,15 @@ def execute_cycle(workspace) -> None:
             final_update["soul_suggestions"] = normalize_soul_suggestions(
                 soul_suggestions
             )
+        if merged and merged.get("merged"):
+            # The gate log says the publish gate approved, which is a
+            # decision. These two say the change is on the default branch and
+            # name the commit it is, so counting merged cycles or following
+            # one to its commit does not mean reading git's output back out of
+            # a rationale sentence.
+            for field in ("merged_at", "merge_commit_sha"):
+                if merged.get(field):
+                    final_update[field] = merged[field]
         rejection = report_cycle(final_update)
         if rejection:
             # This report is the record, not progress. Left unrecorded the

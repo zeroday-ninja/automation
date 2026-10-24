@@ -78,7 +78,7 @@ import sys
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 # Detect execution mode based on AGENT_SERVER_URL presence
 agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
@@ -266,7 +266,7 @@ def _build_conversation_title(event_context) -> str | None:
         if isinstance(repo_name, str) and repo_name and number is not None:
             context = f"{repo_name.rsplit('/', 1)[-1]}#{number}"
     if context is None:
-        context = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        context = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     return f"{name} — {context}"[:200]
 
 

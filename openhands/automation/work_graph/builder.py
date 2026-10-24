@@ -217,6 +217,12 @@ def build_graph(
                     "followups": cycle.followups or [],
                     "prompt_digest": cycle.prompt_digest,
                     "verdict_rule_version": cycle.verdict_rule_version,
+                    # Whether the change landed. The publish gate's route is
+                    # in `gate_decisions` below, but that is the decision; an
+                    # authorised merge can still fail, and a reader counting
+                    # merged work needs the outcome.
+                    "merged_at": _utc(cycle.merged_at),
+                    "merge_commit_sha": cycle.merge_commit_sha,
                     "runtime_switches": cycle.runtime_switches or [],
                     # Where each gate sent the work, and what it is waiting
                     # for if it stopped. The question has to be on the node:
@@ -299,10 +305,42 @@ def build_graph(
                     label=cycle.pr_url,
                     status=status,
                     updated_at=updated,
-                    attrs={"kind": "pull-request", "url": cycle.pr_url},
+                    attrs={
+                        "kind": "pull-request",
+                        "url": cycle.pr_url,
+                        "merged": cycle.merged_at is not None,
+                    },
                 )
             )
             artifact_keys.append(pr_key)
+        if cycle.merge_commit_sha:
+            # Content-addressed, like the repository and the pull request, and
+            # for the same reason: this is the key a reader *starts* from.
+            # Someone holding a commit from the default branch and asking
+            # which prompt and sources produced it joins on this node, and two
+            # backends that merged the same change join here too.
+            commit_key = f"commit:{cycle.merge_commit_sha}"
+            graph.node(
+                WorkNode(
+                    key=commit_key,
+                    kind=WorkNodeKind.ARTIFACT,
+                    label=cycle.merge_commit_sha[:12],
+                    status=status,
+                    updated_at=updated,
+                    attrs={
+                        "kind": "commit",
+                        "sha": cycle.merge_commit_sha,
+                        "merged_at": _utc(cycle.merged_at),
+                        "repository": cycle.repo_url,
+                    },
+                )
+            )
+            # Deliberately not in `artifact_keys`. Those are what the builder
+            # produced and what the reviewer judged, and the builder's
+            # conversation was over before this commit existed: the cycle
+            # merged it at the publish gate. Attributing it to the builder
+            # would say an agent produced something it never saw.
+            graph.edge(WorkEdgeKind.PRODUCES, cycle_key, commit_key)
 
         builder_key: str | None = None
         if cycle.builder_conversation_id:

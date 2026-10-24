@@ -697,6 +697,53 @@ class TestCycleReporting:
             (hop["from"], hop["to"], hop["reason"]) for hop in body["runtime_switches"]
         ] == [("claude-code", "codex", "usage_limit")]
 
+    async def test_whether_the_change_landed_is_data_not_a_rationale_sentence(
+        self, async_client
+    ):
+        """A merged cycle has to be identifiable without reading prose.
+
+        The publish gate approving is a decision, and an authorised merge can
+        still fail, so the gate log cannot answer "did this land". It used to
+        be the only record: the merge appeared as git's own output inside a
+        rationale, which means counting merged cycles, or following one to the
+        commit on the default branch, meant parsing a sentence.
+        """
+        # Arrange
+        program, cycle_id = await self._claimed_cycle(async_client)
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "status": "COMPLETED",
+                "verdict": "ACCEPTED",
+                "pr_url": "https://github.com/acme/alpha/pull/95",
+                "head_sha": "e595f52",
+                "merged_at": "2026-10-24T18:01:17Z",
+                "merge_commit_sha": "666481f3154c7f6ce6551a674b9d3205dd724297",
+            },
+        )
+
+        # Assert
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["merged_at"] == "2026-10-24T18:01:17Z"
+        assert body["merge_commit_sha"] == "666481f3154c7f6ce6551a674b9d3205dd724297"
+
+    async def test_a_cycle_that_did_not_merge_says_so_by_omission(self, async_client):
+        # An absent merge must read as absent, not as an empty string that a
+        # caller counting merged cycles would have to know to exclude.
+        program, cycle_id = await self._claimed_cycle(async_client)
+
+        response = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={"status": "COMPLETED", "verdict": "CHANGES_REQUESTED"},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["merged_at"] is None
+        assert response.json()["merge_commit_sha"] is None
+
     async def test_records_the_builder_stage_then_the_reviews(
         self, async_client, async_session
     ):

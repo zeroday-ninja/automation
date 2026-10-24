@@ -205,6 +205,14 @@ class UpdateCycleRequest(BaseModel):
             "a merged change back to the prompt and the sources behind it."
         ),
     )
+    merged_at: UtcDatetime | None = Field(
+        default=None,
+        description=(
+            "When the forge merged this cycle's change. The publish gate "
+            "approving is a decision; this is the outcome."
+        ),
+    )
+    merge_commit_sha: str | None = Field(default=None, max_length=64)
     changed_files: list[str] | None = Field(default=None, max_length=200)
     checks: list[CycleCheck] | None = Field(default=None, max_length=MAX_CHECKS)
     followups: list[str] | None = Field(default=None, max_length=40)
@@ -568,6 +576,8 @@ class CycleResponse(BaseModel):
     error: str | None
     base_sha: str | None
     head_sha: str | None
+    merged_at: UtcDatetime | None
+    merge_commit_sha: str | None
     changed_files: list[str]
     checks: list[dict[str, Any]]
     followups: list[str]
@@ -625,6 +635,8 @@ class CycleResponse(BaseModel):
             error=cycle.error,
             base_sha=cycle.base_sha,
             head_sha=cycle.head_sha,
+            merged_at=cycle.merged_at,
+            merge_commit_sha=cycle.merge_commit_sha,
             changed_files=cycle.changed_files or [],
             checks=cycle.checks or [],
             followups=cycle.followups or [],
