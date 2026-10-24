@@ -394,3 +394,75 @@ async def test_a_parked_cycle_is_not_reaped_however_long_it_waits(
     await async_session.refresh(cycle)
     assert cycle.status is ImproveCycleStatus.PARKED
     assert cycle.reaped is False
+
+
+@pytest.mark.asyncio
+async def test_a_merged_change_is_reachable_from_the_commit_it_became(
+    async_client, async_session
+):
+    """The question provenance exists to answer, asked from the other end.
+
+    Somebody holding a commit on a default branch wants the prompt and the
+    sources behind it. Without a node keyed on that commit there is nowhere to
+    start: the graph had the branch and the pull request, both named by the
+    cycle, and neither is what a `git log` line gives you.
+    """
+    # Arrange
+    automation = await _program(async_session)
+    run = await _run(async_session, automation)
+    sha = "666481f3154c7f6ce6551a674b9d3205dd724297"
+    cycle = await _cycle(
+        async_session,
+        automation,
+        run,
+        pr_url="https://github.com/zeroday-ninja/HAZARD/pull/95",
+        merged_at=datetime(2026, 10, 24, 18, 1, 17, tzinfo=UTC),
+        merge_commit_sha=sha,
+    )
+    await async_session.commit()
+
+    # Act
+    response = await async_client.get(GRAPH)
+
+    # Assert
+    assert response.status_code == 200, response.text
+    body = response.json()
+    nodes = {node["key"]: node for node in body["nodes"]}
+    commit = nodes[f"commit:{sha}"]
+    assert commit["kind"] == "artifact"
+    assert commit["attrs"]["kind"] == "commit"
+    assert commit["attrs"]["repository"] == "https://github.com/zeroday-ninja/HAZARD"
+    edges = {(edge["kind"], edge["from"], edge["to"]) for edge in body["edges"]}
+    assert ("produces", f"cycle:{cycle.id}", f"commit:{sha}") in edges
+    # And the outcome is on the cycle and its pull request, not only implied
+    # by the publish gate's route.
+    assert nodes[f"cycle:{cycle.id}"]["attrs"]["merge_commit_sha"] == sha
+    assert nodes["pr:https://github.com/zeroday-ninja/HAZARD/pull/95"]["attrs"][
+        "merged"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_unmerged_pull_request_says_it_is_unmerged(
+    async_client, async_session
+):
+    # A pull request that never landed must not be indistinguishable from one
+    # whose merge this build cannot see.
+    automation = await _program(async_session)
+    run = await _run(async_session, automation)
+    await _cycle(
+        async_session,
+        automation,
+        run,
+        pr_url="https://github.com/zeroday-ninja/HAZARD/pull/96",
+        verdict=ImproveVerdict.CHANGES_REQUESTED,
+    )
+    await async_session.commit()
+
+    response = await async_client.get(GRAPH)
+
+    assert response.status_code == 200, response.text
+    nodes = {node["key"]: node for node in response.json()["nodes"]}
+    pr = nodes["pr:https://github.com/zeroday-ninja/HAZARD/pull/96"]
+    assert pr["attrs"]["merged"] is False
+    assert not [key for key in nodes if key.startswith("commit:")]

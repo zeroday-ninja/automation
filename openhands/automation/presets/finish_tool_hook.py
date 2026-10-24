@@ -98,7 +98,8 @@ def finish_tool_required_hook_config(script_dir: str) -> HookConfig:
                         command=_python_hook_command(
                             "import shutil\n"
                             "from pathlib import Path\n"
-                            f"shutil.rmtree(Path({runtime_dir!r}), ignore_errors=True)\n"
+                            "shutil.rmtree(Path("
+                            f"{runtime_dir!r}), ignore_errors=True)\n"
                         ),
                         timeout=5,
                     )

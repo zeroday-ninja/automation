@@ -348,6 +348,11 @@ async def update_cycle(
         # cycle with less evidence, not a failed request.
         "base_sha",
         "head_sha",
+        # Whether it landed, and as which commit. Reported rather than
+        # inferred from the publish gate: the gate approving is a decision,
+        # and an authorised merge can still fail.
+        "merged_at",
+        "merge_commit_sha",
         "changed_files",
         "followups",
         "risks",

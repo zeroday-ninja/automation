@@ -82,7 +82,11 @@ production = [
 [tool.ruff]
 target-version = "py312"
 line-length = 88
-extend-exclude = ["openhands/automation/presets", ".pr"]
+# presets/ is linted. It was excluded, which meant pyflakes never saw the
+# files that run a whole cycle inside a sandbox -- so a name used and never
+# imported was a NameError discovered by the cycle that hit it. Only the two
+# rules the preset layout genuinely breaks are waived, below.
+extend-exclude = [".pr"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -100,6 +104,11 @@ extend-select = ["B006", "B008", "B039", "RUF012"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["ARG"]
+# A preset script detects its execution mode, and chooses a workspace, before
+# it can import the SDK, so its imports are deliberately not at the top and
+# deliberately not sorted: `httpx` comes before the workspace context so an
+# import error is caught where it can be reported.
+"openhands/automation/presets/**/*.py" = ["E402", "I001"]
 
 [tool.ruff.lint.flake8-bugbear]
 extend-immutable-calls = [

@@ -10,7 +10,6 @@ import subprocess
 import tarfile
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -55,47 +54,65 @@ requires_docker = pytest.mark.skipif(
 )
 
 
+def _load_preset_function(
+    preset_name: str, function_name: str, namespace: dict[str, Any] | None = None
+) -> Callable[..., Any]:
+    """One function out of a preset script, with the imports it was written against.
+
+    A preset runs a whole automation on import, so a test cannot import one;
+    it lifts the function out of the source instead. The imports come from the
+    file's own leading import block rather than from a list kept here: a hand-
+    written copy of what the module imports goes stale silently, and the
+    failure is a `NameError` inside the function under test that looks like a
+    bug in the function.
+
+    Only the imports *before* the first statement are taken, which is the
+    stdlib block every preset opens with. The SDK imports come later, after
+    the script has chosen its execution mode, and running those would start
+    doing the preset's work.
+    """
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    module = ast.parse(source_path.read_text(), filename=str(source_path))
+
+    leading_imports: list[ast.stmt] = []
+    for node in module.body:
+        if isinstance(node, ast.Import | ast.ImportFrom):
+            leading_imports.append(node)
+        elif not isinstance(node, ast.Expr):  # the module docstring
+            break
+
+    function_node = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == function_name
+    )
+
+    scope: dict[str, Any] = dict(namespace or {})
+    body: list[ast.stmt] = [*leading_imports, function_node]
+    for statement in body:
+        ast.fix_missing_locations(statement)
+    exec(
+        compile(ast.Module(body=body, type_ignores=[]), str(source_path), "exec"),
+        scope,
+    )
+    return cast(Callable[..., Any], scope[function_name])
+
+
 def _load_preset_mcp_normalizer(
     preset_name: str, *, with_coercer: bool = True
 ) -> Callable[[Any], Any]:
-    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
-    module = ast.parse(source_path.read_text(), filename=str(source_path))
-    function_node = next(
-        node
-        for node in module.body
-        if isinstance(node, ast.FunctionDef) and node.name == "_normalize_mcp_config"
+    return _load_preset_function(
+        preset_name,
+        "_normalize_mcp_config",
+        {"_coerce_mcp_config": coerce_mcp_config if with_coercer else None},
     )
-    namespace: dict[str, Any] = {
-        "_coerce_mcp_config": coerce_mcp_config if with_coercer else None
-    }
-    ast.fix_missing_locations(function_node)
-    exec(
-        compile(
-            ast.Module(body=[function_node], type_ignores=[]), str(source_path), "exec"
-        ),
-        namespace,
-    )
-    return cast(Callable[[Any], Any], namespace["_normalize_mcp_config"])
 
 
 def _load_preset_title_builder(preset_name: str) -> Callable[[Any], str | None]:
-    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
-    module = ast.parse(source_path.read_text(), filename=str(source_path))
-    function_node = next(
-        node
-        for node in module.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "_build_conversation_title"
+    return cast(
+        Callable[[Any], str | None],
+        _load_preset_function(preset_name, "_build_conversation_title"),
     )
-    namespace: dict[str, Any] = {"datetime": datetime, "timezone": timezone}
-    ast.fix_missing_locations(function_node)
-    exec(
-        compile(
-            ast.Module(body=[function_node], type_ignores=[]), str(source_path), "exec"
-        ),
-        namespace,
-    )
-    return cast(Callable[[Any], str | None], namespace["_build_conversation_title"])
 
 
 class TestPresetSessionUrl:
