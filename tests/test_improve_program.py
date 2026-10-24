@@ -369,6 +369,116 @@ class TestTheBuilderShare:
         assert body["within_target"] is None
 
 
+class TestFollowingAMergedChangeBack:
+    """The audit trail's own measure, which nothing could read.
+
+    The trail exists to answer one question — somebody holding a commit on a
+    default branch asks what produced it — and the plan sets a number on it:
+    95% of merged cycles. Until now the only way to check was to read the rows
+    by hand, which is not a measure anybody runs.
+    """
+
+    async def _merged(
+        self, async_session, program_id: str, **overrides
+    ) -> AutomationImproveCycle:
+        fields = {
+            "merged_at": datetime.now(UTC),
+            "merge_commit_sha": uuid.uuid4().hex[:40],
+            "pr_url": "https://github.com/acme/alpha/pull/1",
+            "prompt_digest": "sha256:" + "a" * 64,
+            "sources": [{"url": "https://example.test/doc", "title": "doc"}],
+        }
+        fields.update(overrides)
+        cycle = AutomationImproveCycle(
+            id=uuid.uuid4(),
+            automation_id=uuid.UUID(program_id),
+            org_id=ORG_ID,
+            repo_index=0,
+            repo_label="alpha",
+            repo_url="https://github.com/acme/alpha",
+            status=ImproveCycleStatus.COMPLETED,
+            builder_runtime="claude-code",
+            **fields,
+        )
+        async_session.add(cycle)
+        await async_session.flush()
+        return cycle
+
+    async def test_a_merged_change_with_its_prompt_and_sources_resolves(
+        self, async_client, async_session
+    ):
+        # Arrange
+        program = await create_program(async_client)
+        await self._merged(async_session, program["id"])
+        await async_session.commit()
+
+        # Act
+        response = await async_client.get("/api/automation/v1/improve/provenance")
+
+        # Assert
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert (body["merged"], body["from_commit"], body["unresolved"]) == (1, 1, 0)
+        assert body["coverage"] == 1.0
+        assert body["within_target"] is True
+
+    async def test_a_squash_merge_resolves_by_its_pull_request_and_says_so(
+        self, async_client, async_session
+    ):
+        # A squash merge rewrites the commit, so the trail still leads back —
+        # by a longer route. The plan asks for that to be reported rather than
+        # hidden, which means it must not pass as the stronger answer.
+        program = await create_program(async_client)
+        await self._merged(async_session, program["id"], merge_commit_sha=None)
+        await async_session.commit()
+
+        response = await async_client.get("/api/automation/v1/improve/provenance")
+
+        body = response.json()
+        assert body["from_commit"] == 0
+        assert body["from_pull_request"] == 1
+        assert body["coverage"] == 1.0
+
+    async def test_a_change_that_cited_nothing_is_a_broken_trail_not_a_pass(
+        self, async_client, async_session
+    ):
+        # The commit is where a reader starts; the prompt and the sources are
+        # what they came for. A merged change with neither leads nowhere.
+        program = await create_program(async_client)
+        await self._merged(async_session, program["id"], sources=None)
+        await self._merged(async_session, program["id"], prompt_digest=None)
+        await self._merged(async_session, program["id"])
+        await async_session.commit()
+
+        response = await async_client.get("/api/automation/v1/improve/provenance")
+
+        body = response.json()
+        assert body["merged"] == 3
+        assert body["unresolved"] == 2
+        assert body["missing"] == {"sources": 1, "prompt_digest": 1}
+        # One of three, well under the plan's 95%.
+        assert body["coverage"] == 0.3333
+        assert body["within_target"] is False
+
+    async def test_a_change_that_never_merged_is_not_counted_against_the_trail(
+        self, async_client, async_session
+    ):
+        # Nothing for anybody to find in a `git log`, so asking it to be
+        # traceable would flatter the number with work nobody has to audit.
+        program = await create_program(async_client)
+        await self._merged(
+            async_session, program["id"], merged_at=None, merge_commit_sha=None
+        )
+        await async_session.commit()
+
+        response = await async_client.get("/api/automation/v1/improve/provenance")
+
+        body = response.json()
+        assert body["merged"] == 0
+        assert body["coverage"] is None
+        assert body["within_target"] is None
+
+
 class TestTheProgramsPackagedCode:
     """A program runs the code it was packaged with, and must say which.
 
