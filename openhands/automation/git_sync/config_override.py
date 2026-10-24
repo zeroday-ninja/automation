@@ -414,9 +414,7 @@ async def apply_remote_config_override(
         remote.consecutive_auth_failures = 0
     if _merge(base, overrides).git_sync_encryption_key != key_before:
         await session.execute(
-            update(AutomationGitSyncState)
-            .where(states_of(remote))
-            .values(dirty=True)
+            update(AutomationGitSyncState).where(states_of(remote)).values(dirty=True)
         )
     remote.overrides = json.dumps(encrypt_secret_fields(overrides))
     if configured_by_user_id is not None:

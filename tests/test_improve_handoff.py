@@ -5,9 +5,6 @@ none of it. What it leaves behind is the difference between the next cycle
 continuing and the next cycle paying to rediscover.
 """
 
-import uuid
-from datetime import UTC, datetime
-
 import pytest
 
 from openhands.automation.config import clear_config_cache
