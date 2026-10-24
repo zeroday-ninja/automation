@@ -122,6 +122,7 @@ from openhands.workspace import OpenHandsCloudWorkspace  # noqa: E402
 # Packaged alongside main.py in the tarball; see its docstring for why the
 # report parsing lives in a module that can be imported without side effects.
 from change_class import assess_diff, claim_mismatch  # noqa: E402
+from lessons import lessons_in_scope, lessons_section  # noqa: E402
 from routing import GateDecision, route_for  # noqa: E402
 from context import (  # noqa: E402
     fetch_identity_set,
@@ -309,6 +310,48 @@ def classify_change(repo_path: str, base_ref: str, branch: str):
         f"{len(assessment.reasons)} reason(s))"
     )
     return assessment
+
+
+#: Share of a prompt's budget reserved for corrections, ahead of everything
+#: else. Identity explains who the work is for; a correction is a rule the work
+#: has already been told once, so it goes first and it is the last thing cut.
+LESSON_BUDGET_CHARS = 6000
+
+
+class LessonsUnavailable(Exception):
+    """The corrections in force could not be read.
+
+    Fatal on purpose. A cycle that runs without the corrections it is under is
+    how a correction comes back as something the user has to give again, and
+    the whole point of this mechanism is that they should not have to. An
+    *empty* set of corrections is fine; an unreadable one is not.
+    """
+
+
+def fetch_lessons(repo_label: str, remote_id: str | None, runtime: str | None) -> tuple:
+    """The corrections this cycle works under, and their ids.
+
+    The ids are reported back with the cycle, because they are the only thing
+    that tells "the work ignored a correction" apart from "the work never saw
+    it" when the same correction arrives again.
+    """
+    try:
+        payload = cycle_request("GET", "/v1/lessons")
+    except Exception as exc:
+        raise LessonsUnavailable(str(exc)[:300]) from exc
+    lessons = payload.get("lessons") if isinstance(payload, dict) else None
+    if not isinstance(lessons, list):
+        raise LessonsUnavailable("the lessons response carried no list")
+    scoped = lessons_in_scope(
+        lessons, repository=remote_id or repo_label, runtime=runtime
+    )
+    print(f"  corrections in force: {len(scoped)} of {len(lessons)}")
+    repeated = [item for item in scoped if (item.get("repeats") or 0) > 0]
+    if repeated:
+        # Named in the log, because a correction that has already had to be
+        # repeated is the one most likely to be repeated again.
+        print(f"  {len(repeated)} of them have had to be given more than once")
+    return scoped, [str(item.get("id")) for item in scoped if item.get("id")]
 
 
 def gate(
@@ -795,6 +838,21 @@ def execute_cycle(workspace) -> None:
         )
         builder = profiles.get(builder_id) or {}
         builder_runtime = builder.get("runtime")
+
+        # Read once the runtime is known, because a correction can be about
+        # one runtime's quirks, and fatal if unreadable: a cycle that runs
+        # without the corrections it is under is how a correction comes back
+        # as something the user has to give again. An *empty* set is fine.
+        #
+        # Prepended to the identity block and stated as rules rather than as
+        # history: a correction rendered as "the user once said" invites a
+        # judgement about whether it still applies, which is exactly the
+        # judgement that produces a repeat.
+        lessons, lesson_ids = fetch_lessons(
+            repo_label, cycle.get("remote_id"), builder_runtime
+        )
+        soul_section = lessons_section(lessons, LESSON_BUDGET_CHARS) + soul_section
+
         reviewers = choose_reviewers(config, profiles, builder_id)
         print(f"  builder: {builder.get('name') or builder_id} ({builder_runtime})")
         if reviewers:
@@ -957,6 +1015,10 @@ def execute_cycle(workspace) -> None:
             "verdict_rule_version": VERDICT_RULE_VERSION,
             "runtime_switches": trace["switches"],
             "runtime_observations": observations[-MAX_OBSERVATIONS:],
+            # What this cycle actually had in front of it. Reported rather
+            # than inferred: when the same correction arrives again, this is
+            # the only thing that tells "ignored it" from "never saw it".
+            "injected_lesson_ids": lesson_ids,
             # What the builder said it did, kept beside what the diff says it
             # did. The service raises the class to whatever the evidence
             # requires, so an understated claim cannot lower the gate.

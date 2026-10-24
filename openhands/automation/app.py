@@ -24,6 +24,7 @@ from openhands.automation.draft_router import router as draft_router
 from openhands.automation.event_router import router as event_router
 from openhands.automation.git_sync import git_sync_loop
 from openhands.automation.git_sync.router import router as git_sync_router
+from openhands.automation.improve.lesson_router import router as lesson_router
 from openhands.automation.improve.router import router as improve_router
 from openhands.automation.kv_router import router as kv_router
 from openhands.automation.logger import setup_all_loggers
@@ -306,6 +307,7 @@ app.include_router(webhook_router, prefix=_base_path)
 app.include_router(telemetry_router, prefix=_base_path)
 app.include_router(git_sync_router, prefix=_base_path)
 app.include_router(improve_router, prefix=_base_path)
+app.include_router(lesson_router, prefix=_base_path)
 app.include_router(work_graph_router, prefix=_base_path)
 
 app.include_router(kv_router, prefix=_base_path)

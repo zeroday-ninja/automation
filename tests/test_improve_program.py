@@ -1222,3 +1222,185 @@ class TestJudgingADeletion:
 
         assert response.status_code == 422
         assert "attesting its own deletions" in response.text
+
+
+class TestCorrectionsBecomeLessons:
+    """Answering a parked cycle is a correction, and it is kept as one."""
+
+    LESSONS = "/api/automation/v1/lessons"
+
+    async def _parked_breaking(
+        self, async_client, label: str, *, remote: bool = True
+    ) -> str:
+        # The remote is added once per repository: a second configuration for
+        # the same repository is refused, and rightly.
+        if remote:
+            await add_remote(async_client, f"https://github.com/acme/{label}", label)
+        program = await create_program(async_client)
+        cycle_id = (await claim(async_client, program["id"])).json()["cycle"]["id"]
+        response = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "status": "PARKED",
+                "change_class": "breaking",
+                "branch": "improve/envelope",
+                "parked_phase": "publish",
+                "parked_question": "Publish the rename now, or wait?",
+                "injected_lesson_ids": [],
+            },
+        )
+        assert response.status_code == 200, response.text
+        return cycle_id
+
+    async def test_an_answer_is_filed_without_being_asked_for(self, async_client):
+        # Arrange
+        cycle_id = await self._parked_breaking(async_client, "alpha")
+
+        # Act
+        resolved = await async_client.post(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/resolve",
+            json={
+                "route": "cycle",
+                "resolution": (
+                    "Wait for the client release before renaming a wire contract."
+                ),
+            },
+        )
+        assert resolved.status_code == 200, resolved.text
+
+        # Assert: a correction the user *made* is recorded without asking
+        # them. An agent's guess about their preferences stays a proposal.
+        listed = await async_client.get(self.LESSONS)
+        assert listed.status_code == 200, listed.text
+        lessons = listed.json()["lessons"]
+        assert len(lessons) == 1
+        assert lessons[0]["trigger"] == "parked_resolution"
+        assert lessons[0]["scope"] == "project"
+        # Verbatim: paraphrasing a correction is how it comes back as
+        # something they have to give again.
+        assert lessons[0]["text"].startswith("Wait for the client release")
+        assert lessons[0]["repeats"] == 0
+
+    async def test_the_same_answer_twice_is_a_repeat_with_a_diagnosis(
+        self, async_client
+    ):
+        # Arrange: the same correction, given on two cycles.
+        first = await self._parked_breaking(async_client, "beta")
+        await async_client.post(
+            f"/api/automation/v1/improve/cycles/{first}/resolve",
+            json={
+                "route": "cycle",
+                "resolution": (
+                    "Wait for the client release before renaming a wire contract."
+                ),
+            },
+        )
+        second = await self._parked_breaking(async_client, "beta", remote=False)
+
+        # Act: said differently, meant identically.
+        await async_client.post(
+            f"/api/automation/v1/improve/cycles/{second}/resolve",
+            json={
+                "route": "cycle",
+                "resolution": (
+                    "Do not rename a wire contract until the client release is out."
+                ),
+            },
+        )
+
+        # Assert: one lesson, not two, and the repeat is counted with the
+        # stage that let it through named.
+        listed = await async_client.get(self.LESSONS)
+        lessons = listed.json()["lessons"]
+        assert len(lessons) == 1
+        assert lessons[0]["repeats"] == 1
+
+        incidents = await async_client.get(f"{self.LESSONS}/incidents")
+        assert incidents.status_code == 200, incidents.text
+        body = incidents.json()
+        assert body["total"] == 1
+        # The cycle reported loading no lessons, so this is an injection
+        # failure rather than the work ignoring something it had.
+        assert body["incidents"][0]["stage"] == "not_injected"
+        # Every stage, including the ones at zero: a count of zero is
+        # information.
+        assert set(body["by_stage"]) >= {"never_captured", "ignored"}
+
+    async def test_an_acknowledgement_is_not_kept_as_a_correction(self, async_client):
+        # Arrange
+        cycle_id = await self._parked_breaking(async_client, "gamma")
+
+        # Act
+        await async_client.post(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/resolve",
+            json={"route": "approve", "resolution": "Yes, go ahead."},
+        )
+
+        # Assert: storing these would bury the real corrections in a list a
+        # person has to read.
+        listed = await async_client.get(self.LESSONS)
+        assert listed.json()["lessons"] == []
+
+    async def test_mechanising_a_lesson_names_what_now_checks_it(self, async_client):
+        # Arrange
+        captured = await async_client.post(
+            self.LESSONS,
+            json={
+                "scope": "user",
+                "trigger": "chat_instruction",
+                "text": "Never add a dependency without checking its age.",
+            },
+        )
+        assert captured.status_code == 201, captured.text
+        lesson_id = captured.json()["lesson"]["id"]
+
+        # Act
+        mechanised = await async_client.post(
+            f"{self.LESSONS}/{lesson_id}/mechanise",
+            json={"check_ref": "scripts/check-dependency-age.cjs"},
+        )
+
+        # Assert: the stage that actually ends repetition — a model that
+        # skims the document still fails the check.
+        assert mechanised.status_code == 200, mechanised.text
+        assert mechanised.json()["mechanised"] is True
+        assert mechanised.json()["check_ref"].endswith(".cjs")
+
+    async def test_mechanised_with_nothing_named_is_refused(self, async_client):
+        captured = await async_client.post(
+            self.LESSONS,
+            json={
+                "scope": "user",
+                "trigger": "comment",
+                "text": "Keep commit subjects under seventy characters.",
+            },
+        )
+        lesson_id = captured.json()["lesson"]["id"]
+
+        response = await async_client.post(
+            f"{self.LESSONS}/{lesson_id}/mechanise", json={"check_ref": ""}
+        )
+
+        assert response.status_code == 422
+
+    async def test_a_retired_lesson_keeps_the_record_that_it_was_needed(
+        self, async_client
+    ):
+        captured = await async_client.post(
+            self.LESSONS,
+            json={
+                "scope": "user",
+                "trigger": "comment",
+                "text": "Stop asking before every additive change.",
+            },
+        )
+        lesson_id = captured.json()["lesson"]["id"]
+
+        retired = await async_client.post(f"{self.LESSONS}/{lesson_id}/retire")
+
+        assert retired.status_code == 200, retired.text
+        assert retired.json()["status"] == "retired"
+        # Gone from what applies, still there as evidence this was needed.
+        assert (await async_client.get(self.LESSONS)).json()["lessons"] == []
+        all_of_them = await async_client.get(f"{self.LESSONS}?include_retired=true")
+        assert len(all_of_them.json()["lessons"]) == 1

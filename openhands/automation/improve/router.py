@@ -29,6 +29,9 @@ from openhands.automation.improve.change_class import (
 )
 from openhands.automation.improve.config import ImproveProgramConfig
 from openhands.automation.improve.handoff import parse_handoff
+from openhands.automation.improve.lesson_router import (
+    capture_resolution_as_lesson,
+)
 from openhands.automation.improve.rotation import (
     AllRepositoriesCappedError,
     DailyCeilingReachedError,
@@ -350,6 +353,7 @@ async def update_cycle(
         # share-of-work measurement can use.
         "runtime_switches",
         "claimed_change_class",
+        "injected_lesson_ids",
     ):
         if field in updates:
             setattr(cycle, field, updates[field])
@@ -811,6 +815,11 @@ async def resolve_cycle(
             if cycle.parked_phase in ("review", "judge", "publish")
             else ImproveCycleStatus.BUILDING
         )
+    # A correction the user actually made, recorded without asking them for
+    # it. This is the line that separates learning from remembering: an
+    # agent's guess about their preferences is a soul_suggestion they have to
+    # accept, while an answer they gave to a real question is already theirs.
+    await capture_resolution_as_lesson(session, cycle, body.resolution, user)
     cycle.updated_at = utcnow()
     await session.flush()
     await session.refresh(cycle)
