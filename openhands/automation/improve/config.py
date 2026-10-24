@@ -110,6 +110,17 @@ class ImproveProgramConfig(BaseModel):
             "the turn's own builder is skipped rather than self-reviewing."
         ),
     )
+    merge_when_authorised: bool = Field(
+        default=True,
+        description=(
+            "Whether a cycle may merge its own pull request once the service "
+            "has authorised it. An additive change with passing checks needs "
+            "nobody's confirmation, which is what this implements. A deletion "
+            "still needs the judge and a breaking change still needs a "
+            "person, whatever this is set to -- authority is resolved from the "
+            "change's class and this only decides what happens after a yes."
+        ),
+    )
     judge_profile_id: uuid.UUID | None = Field(
         default=None,
         description=(

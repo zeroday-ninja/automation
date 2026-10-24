@@ -249,10 +249,13 @@ def test_the_rules_ship_into_the_sandbox_that_applies_them() -> None:
     with tarfile.open(fileobj=io.BytesIO(_generate_improve_tarball())) as tar:
         shipped = set(tar.getnames())
 
-    assert "change_class.py" in shipped
+    assert {"change_class.py", "routing.py", "judge_prompt.md"} <= shipped
 
 
-def test_the_rules_need_nothing_but_the_standard_library() -> None:
+@pytest.mark.parametrize("module", ["change_class.py", "routing.py"])
+def test_a_shipped_rule_module_needs_nothing_but_the_standard_library(
+    module: str,
+) -> None:
     # Imported inside a sandbox that has no `openhands.automation` installed,
     # so a convenience import added here is an ImportError there.
     import ast
@@ -263,15 +266,16 @@ def test_the_rules_need_nothing_but_the_standard_library() -> None:
         / "openhands"
         / "automation"
         / "improve"
-        / "change_class.py"
+        / module
     ).read_text()
+    tree = ast.parse(source)
     imported = {
         node.module.split(".")[0]
-        for node in ast.walk(ast.parse(source))
+        for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom) and node.module
     } | {
         alias.name.split(".")[0]
-        for node in ast.walk(ast.parse(source))
+        for node in ast.walk(tree)
         if isinstance(node, ast.Import)
         for alias in node.names
     }

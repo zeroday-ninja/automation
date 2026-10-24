@@ -92,7 +92,12 @@ cycle. Report it with the sources and change nothing.
 - Push the branch.
 {{PR_INSTRUCTION}}
 - Never push to the default branch. Never force-push anything outside
-  `{{BRANCH_PREFIX}}`. Never merge your own change: a human decides.
+  `{{BRANCH_PREFIX}}`.
+- **Never merge your own change.** Whether it is merged at all is decided after
+  you are done, by the service, from your diff and your evidence — not by you
+  and not by asking. If your change removes code, a judge on another runtime
+  reads every removal first. If it breaks anyone relying on this code, a person
+  decides and your work waits on its branch until they do.
 
 ## Step 6 — Write the report
 

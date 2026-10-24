@@ -275,3 +275,73 @@ class TestChooseReviewers:
 
         assert [reviewer["id"] for reviewer in chosen] == ["unknown"]
         assert chosen[0]["runtime"] is None
+
+
+class TestNormalizeRemovals:
+    """The judge's removals, before they reach the service."""
+
+    def test_an_assertion_without_a_checkable_where_is_dropped(self, report):
+        removals = report.normalize_removals(
+            [
+                {"path": "a.py", "finding": "dead", "where": "grep found nothing"},
+                {"path": "b.py", "finding": "dead", "where": "  "},
+                {"path": "c.py", "finding": "dead"},
+            ]
+        )
+
+        # "It looks unused" is an assertion, and an attestation built out of
+        # assertions is worse than none because it reads as evidence.
+        assert [entry["path"] for entry in removals] == ["a.py"]
+
+    def test_a_finding_outside_the_three_is_dropped(self, report):
+        removals = report.normalize_removals(
+            [
+                {"path": "a.py", "finding": "probably fine", "where": "I looked"},
+                {"path": "b.py", "finding": "COVERED", "where": "tests/test_b.py"},
+            ]
+        )
+
+        assert [entry["finding"] for entry in removals] == ["covered"]
+
+    def test_anything_that_is_not_a_list_of_records_is_nothing(self, report):
+        for raw in (None, "dead", 7, [None, 3, "x"], [{"finding": "dead"}]):
+            assert report.normalize_removals(raw) == []
+
+
+class TestChangeoverPlan:
+    """What a person needs in order to answer a breaking change."""
+
+    def test_what_the_builder_did_not_supply_is_recorded_as_absent(self, report):
+        plan = report.changeover_plan({}, [], "improve/20261024")
+
+        # A plan with a silently empty rollback reads as a plan with no
+        # rollback needed, which is the opposite of what an empty field means.
+        assert "did not say who depends" in plan["consumers"][0]
+        assert "no changeover sequence" in plan["sequence"][0]
+        assert "Not stated by the builder" in plan["rollback"]
+        assert plan["branch"] == "improve/20261024"
+
+    def test_what_breaks_comes_from_the_diff_not_from_the_builder(self, report):
+        plan = report.changeover_plan(
+            {"rollback": "revert the server commit"},
+            [
+                {
+                    "rule": "removed_export",
+                    "path": "openhands/schemas.py",
+                    "detail": "-class EventEnvelope:",
+                }
+            ],
+            "improve/20261024",
+        )
+
+        assert plan["breaks"] == [
+            "removed_export in openhands/schemas.py: -class EventEnvelope:"
+        ]
+        assert plan["rollback"] == "revert the server commit"
+
+    def test_an_unreadable_diff_says_so_rather_than_claiming_nothing_breaks(
+        self, report
+    ):
+        plan = report.changeover_plan({}, None, "improve/20261024")
+
+        assert plan["breaks"] == ["the diff could not be read"]
