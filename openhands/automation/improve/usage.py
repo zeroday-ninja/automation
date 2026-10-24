@@ -27,7 +27,11 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.automation.models import AutomationRuntimeUsage, RuntimeUsageState
+from openhands.automation.models import (
+    AutomationImproveCycle,
+    AutomationRuntimeUsage,
+    RuntimeUsageState,
+)
 
 
 #: How long a runtime is presumed exhausted when nothing said otherwise.
@@ -297,3 +301,85 @@ async def last_observation_of(
         }
         for row in rows
     }
+
+
+@dataclass(frozen=True, slots=True)
+class BuilderShare:
+    """How the building was divided between runtimes over a window.
+
+    The plan's measure for runtime rotation is a *share*, not a count: "within
+    twenty percent of even", against a starting point where one runtime built
+    31 of 33 cycles. A share needs a denominator and a window, and neither is
+    the daily counter on the ledger -- that one rolls over, which is what makes
+    it useless for answering "is the rotation actually working".
+    """
+
+    runtime: str
+    cycles: int
+    share: float
+
+
+def evenness_gap(shares: list[BuilderShare]) -> float | None:
+    """How far the widest share is from an even split, in percentage points.
+
+    The gap, not the variance: the question is whether any one runtime is
+    doing too much of the work, and a single runtime at 60% is the failure
+    whatever the others are doing. ``None`` when nothing has been built, which
+    is not a gap of zero -- it is no measurement at all.
+    """
+    if not shares:
+        return None
+    even = 1.0 / len(shares)
+    return round(max(abs(entry.share - even) for entry in shares) * 100, 1)
+
+
+async def builder_share(
+    session: AsyncSession,
+    org_id: uuid.UUID,
+    *,
+    days: int,
+    now: datetime | None = None,
+) -> tuple[list[BuilderShare], datetime, int]:
+    """Who built the cycles of the last ``days``, and what fraction each did.
+
+    Counted from the cycles themselves rather than from the ledger, because
+    the ledger's counters are per-day and roll over, and because the runtime
+    of record on a cycle is the one that *actually ran* -- a cycle that failed
+    over mid-change belongs to whichever runtime finished it, which is the
+    only reading a share-of-work measurement can use.
+
+    Returns the shares, the start of the window, and how many days of history
+    actually exist inside it. The last of those matters: "even over a week"
+    read off two days of data is not the measurement, and a caller that cannot
+    tell the difference will report a number that means nothing.
+    """
+    moment = now or datetime.now(UTC)
+    since = moment - timedelta(days=days)
+    rows = (
+        await session.execute(
+            select(
+                AutomationImproveCycle.builder_runtime,
+                AutomationImproveCycle.created_at,
+            ).where(
+                AutomationImproveCycle.org_id == org_id,
+                AutomationImproveCycle.created_at >= since,
+                AutomationImproveCycle.builder_runtime.is_not(None),
+            )
+        )
+    ).all()
+
+    counts: dict[str, int] = {}
+    earliest: datetime | None = None
+    for runtime, created_at in rows:
+        counts[runtime] = counts.get(runtime, 0) + 1
+        stamp = created_at if created_at.tzinfo else created_at.replace(tzinfo=UTC)
+        if earliest is None or stamp < earliest:
+            earliest = stamp
+
+    total = sum(counts.values())
+    shares = [
+        BuilderShare(runtime=name, cycles=count, share=count / total)
+        for name, count in sorted(counts.items(), key=lambda item: -item[1])
+    ]
+    covered = 0 if earliest is None else max(1, (moment - earliest).days + 1)
+    return shares, since, min(covered, days)
