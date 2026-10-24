@@ -22,6 +22,7 @@ from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
     AutomationRun,
+    AutomationRunStatus,
     AutomationState,
 )
 from openhands.automation.observability import (
@@ -209,6 +210,49 @@ async def poll_and_schedule(
                 # _is_automation_due_safely can disable an automation as a side
                 # effect, which git sync needs to hear about too.
                 await mark_git_sync_dirty(session, automation)
+
+        # One run at a time, per automation.
+        #
+        # There was no such guard, which was survivable while a program fired
+        # nightly and fatal the moment one fires every minute: a cycle takes
+        # tens of minutes, so a program would stack runs on itself until the
+        # sandbox quota or the database gave way. Checked here rather than in
+        # the dispatcher because a run row created and then skipped has
+        # already cost a row, a sandbox decision and a log line.
+        if due_automations:
+            live = set(
+                (
+                    await session.execute(
+                        select(AutomationRun.automation_id).where(
+                            AutomationRun.automation_id.in_(
+                                [item.id for item in due_automations]
+                            ),
+                            AutomationRun.status.in_(
+                                (
+                                    AutomationRunStatus.PENDING,
+                                    AutomationRunStatus.RUNNING,
+                                )
+                            ),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if live:
+                skipped = [item for item in due_automations if item.id in live]
+                for automation in skipped:
+                    logger.info(
+                        "Skipping tick: a run is already in flight",
+                        extra={"automation_id": str(automation.id)},
+                    )
+                # Deliberately *not* stamping `last_triggered_at` for these:
+                # the cursor marks when a run was actually created, and
+                # advancing it here would make the next tick think this one
+                # fired.
+                due_automations = [
+                    item for item in due_automations if item.id not in live
+                ]
 
         for automation in due_automations:
             try:

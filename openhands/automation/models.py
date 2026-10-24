@@ -2,7 +2,7 @@
 
 import enum
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -18,6 +18,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
     false,
     text,
@@ -1012,6 +1013,93 @@ class ImproveVerdict(StrEnum):
     NO_CHANGE = "NO_CHANGE"
 
 
+class RuntimeUsageState(StrEnum):
+    """What is known about a runtime's remaining subscription usage."""
+
+    AVAILABLE = "AVAILABLE"
+    #: A request was refused for usage reasons. Transient by nature: these
+    #: windows reset, which is why the row also records when.
+    EXHAUSTED = "EXHAUSTED"
+    #: Never observed. Not the same as available — a runtime nobody has used
+    #: has told us nothing, and treating silence as health is how a program
+    #: spends its first cycle discovering a limit.
+    UNKNOWN = "UNKNOWN"
+
+
+class AutomationRuntimeUsage(Base):
+    """What is known about one agent runtime's remaining usage.
+
+    Scheduling memory, not conversation state: "which subscription is spent,
+    and until when" spans cycles, programs and days, so it belongs beside the
+    scheduler rather than inside any one run.
+
+    Org-scoped rather than per automation on purpose. Several programs share
+    two or three runtimes, and a per-automation record would let one program
+    spend the usage another thinks it still has.
+
+    Recovery is **derived at read time, never scheduled**: a row is written
+    only when something is observed, and whether a runtime is available again
+    is decided against the clock when it is read. A restart therefore cannot
+    drop a transition, and a long outage cannot leave a runtime wrongly
+    pinned to exhausted.
+    """
+
+    __tablename__ = "automation_runtime_usage"
+    __table_args__ = (
+        UniqueConstraint("org_id", "runtime", name="uq_runtime_usage_org_runtime"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+
+    #: The ACP server key, not a profile id. Profiles come and go and two can
+    #: share a runtime, but the *subscription* is the thing with a budget.
+    runtime: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    state: Mapped[RuntimeUsageState] = mapped_column(
+        Enum(RuntimeUsageState, native_enum=False, length=16),
+        default=RuntimeUsageState.UNKNOWN,
+        nullable=False,
+    )
+    last_exhausted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    #: When the window is expected to reset, and where that came from. The
+    #: source matters: a time parsed out of a refusal is worth more than a
+    #: default cooldown, and a reader deciding whether to trust it needs to
+    #: know which it is looking at.
+    observed_reset_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reset_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    consecutive_exhaustions: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
+
+    #: The local day these counters belong to. Rolled over on read rather
+    #: than by a job, for the same reason recovery is derived.
+    window_started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    cycles_attempted: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cycles_completed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    last_success_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    #: Bounded, redacted evidence for the dashboard: what was actually seen,
+    #: so a user can tell a real limit from a misread error message.
+    last_observation: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+
+
 class AutomationImproveCycle(Base):
     """One pass of an improvement program over one repository.
 
@@ -1129,9 +1217,7 @@ class AutomationImproveCycle(Base):
     # Which rule turned a set of reviews into this verdict. The aggregation
     # lives in code that ships into the sandbox, so without this, editing the
     # severity table would retroactively reinterpret every past verdict.
-    verdict_rule_version: Mapped[str | None] = mapped_column(
-        String(32), nullable=True
-    )
+    verdict_rule_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     # Closed by the janitor rather than by the run that claimed it. An
     # absence of evidence, deliberately not a verdict: a reaped cycle must not

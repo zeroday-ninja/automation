@@ -159,6 +159,17 @@ class ImproveProgramConfig(BaseModel):
         ),
     )
 
+    daily_cycles_per_repository: int | None = Field(
+        default=None,
+        ge=1,
+        le=100,
+        description=(
+            "Cycles this program may take on one repository in a day. The "
+            "service's own limit applies when this is unset, and the stricter "
+            "of the two always wins — a program cannot raise its own ceiling."
+        ),
+    )
+
     @field_validator("branch_prefix")
     @classmethod
     def validate_branch_prefix(cls, v: str) -> str:
