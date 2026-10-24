@@ -330,6 +330,11 @@ async def update_cycle(
         "risks",
         "prompt_digest",
         "verdict_rule_version",
+        # The route the builder's runtime actually took. `builder_runtime` is
+        # reported twice on purpose: once at claim time from the profile, and
+        # again here with whatever ran, which is the only one an audit or a
+        # share-of-work measurement can use.
+        "runtime_switches",
     ):
         if field in updates:
             setattr(cycle, field, updates[field])

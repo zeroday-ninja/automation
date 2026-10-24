@@ -641,6 +641,41 @@ class TestCycleReporting:
         response = await claim(async_client, program["id"])
         return program, response.json()["cycle"]["id"]
 
+    async def test_the_runtime_that_ran_replaces_the_one_that_was_claimed(
+        self, async_client, async_session
+    ):
+        # Arrange: claimed on one runtime, built by another after a failover.
+        program, cycle_id = await self._claimed_cycle(async_client)
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "status": "COMPLETED",
+                "verdict": "ACCEPTED",
+                "builder_runtime": "codex",
+                "runtime_switches": [
+                    {
+                        "from": "claude-code",
+                        "to": "codex",
+                        "reason": "usage_limit",
+                        "at": "2026-10-24T08:00:00+00:00",
+                        "detail": "you've hit your usage limit",
+                    }
+                ],
+            },
+        )
+
+        # Assert: the route is kept, because the conversation that holds the
+        # switch events is deleted with its sandbox -- and the runtime of
+        # record is the one that actually did the work.
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["builder_runtime"] == "codex"
+        assert [
+            (hop["from"], hop["to"], hop["reason"]) for hop in body["runtime_switches"]
+        ] == [("claude-code", "codex", "usage_limit")]
+
     async def test_records_the_builder_stage_then_the_reviews(
         self, async_client, async_session
     ):
@@ -677,8 +712,7 @@ class TestCycleReporting:
                         "runtime": "codex",
                         "verdict": "CHANGES_REQUESTED",
                         "updates_checked": (
-                            "Parser 3.2 is the latest release; nothing "
-                            "supersedes it."
+                            "Parser 3.2 is the latest release; nothing supersedes it."
                         ),
                         "summary": "The cited changelog covers a later version.",
                         "concerns": ["the pin does not match the cited release"],

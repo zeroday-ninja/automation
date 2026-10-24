@@ -131,6 +131,7 @@ from context import (  # noqa: E402
     project_identity_sections,
     prompt_digest,
     read_project_identity,
+    trace_runtime,
 )
 from report import (  # noqa: E402
     VERDICT_RULE_VERSION,
@@ -197,6 +198,79 @@ def report_from_final_response(workspace, conversation_id: str | None) -> dict |
     if parsed is not None:
         print("  recovered the report from the agent's final answer")
     return parsed
+
+
+#: Most observations one report may carry, matching the service's own cap.
+#: Over it, the newest are kept: the oldest were already sent by an earlier
+#: stage of the same cycle.
+MAX_OBSERVATIONS = 20
+
+
+def _now_iso() -> str:
+    """This moment, as the service's schemas expect it."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def conversation_events(workspace, conversation_id: str | None) -> list[dict] | None:
+    """A conversation's events, oldest first, or ``None`` when unreadable.
+
+    Read for one reason: the typed record of which runtime actually served the
+    conversation. ``None`` rather than ``[]`` on failure, because an empty
+    list means "nothing switched" and that is a different claim from "nobody
+    could tell"; the caller reports the second as a degraded trace.
+
+    One page: a switch happens at most a handful of times in a conversation,
+    and the newest events are the ones that carry the route, so a truncated
+    read loses the beginning -- which the profile's own runtime already gives
+    us -- rather than the end.
+    """
+    if not conversation_id:
+        return None
+    try:
+        response = workspace.client.get(
+            f"/api/conversations/{conversation_id}/events/search",
+            params={"limit": 100, "sort_order": "TIMESTAMP_DESC"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        print(f"  WARNING: could not read the conversation's events: {exc}")
+        return None
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        print("  WARNING: the events response carried no items")
+        return None
+    return [event for event in reversed(items) if isinstance(event, dict)]
+
+
+def runtime_trace(
+    workspace,
+    conversation_id: str | None,
+    *,
+    started_on: str | None,
+    finished: bool,
+) -> dict:
+    """What actually ran this conversation, and what it tells the ledger.
+
+    A switch mid-conversation is reported rather than left in the transcript:
+    recording the work against a runtime that ran out would misstate both the
+    audit trail and which subscription is being spent.
+    """
+    trace = trace_runtime(
+        conversation_events(workspace, conversation_id),
+        started_on=started_on,
+        finished=finished,
+        conversation_id=conversation_id,
+        observed_at=_now_iso(),
+    )
+    if trace["degraded"]:
+        print(f"  runtime trace degraded: {trace['degraded']}")
+    for switch in trace["switches"]:
+        print(
+            f"  runtime switched {switch['from']} -> {switch['to']} "
+            f"({switch['reason']})"
+        )
+    return trace
 
 
 def _no_updates_answer(error: str | None) -> str | None:
@@ -415,11 +489,6 @@ else:
     )
 
 
-def _now_iso() -> str:
-    """This moment, as the service's schemas expect it."""
-    return datetime.now(timezone.utc).isoformat()
-
-
 def write_handoff(
     workspace,
     repo_path: str,
@@ -440,12 +509,8 @@ def write_handoff(
     built from `git rev-parse` costs no tokens at all.
     """
     try:
-        prompt = render(
-            load_template("handoff_prompt.md"), {"BRANCH": branch}
-        )
-        run_conversation(
-            workspace, builder_id, prompt, f"Hand off {repo_label}"
-        )
+        prompt = render(load_template("handoff_prompt.md"), {"BRANCH": branch})
+        run_conversation(workspace, builder_id, prompt, f"Hand off {repo_label}")
     except Exception as exc:  # noqa: BLE001 - nothing here may fail the cycle
         print(f"  the runtime could not write its own handoff: {exc}")
 
@@ -667,15 +732,31 @@ def execute_cycle(workspace) -> None:
             if not looks_exhausted(str(failure.cause)):
                 raise
             print("  the builder's runtime is out of usage; handing off")
-            observations.append(
-                {
-                    "runtime": builder_runtime,
-                    "outcome": "exhausted",
-                    "observed_at": _now_iso(),
-                    "evidence": str(failure.cause)[:500],
-                    "conversation_id": failure.conversation_id,
-                }
+            trace = runtime_trace(
+                workspace,
+                failure.conversation_id,
+                started_on=builder_runtime,
+                finished=False,
             )
+            # The conversation's own events say which runtime refused; the
+            # exception string is the fallback for a server too old to emit
+            # the typed events, and for a failure that never reached one.
+            if trace["observations"]:
+                observations.extend(trace["observations"])
+            else:
+                observations.append(
+                    {
+                        "runtime": trace["ran"] or builder_runtime,
+                        "outcome": "exhausted",
+                        "observed_at": _now_iso(),
+                        "evidence": str(failure.cause)[:500],
+                        "conversation_id": failure.conversation_id,
+                    }
+                )
+            # Whatever ran last is what ran out, and what the handoff is
+            # written by. Recording the profile's runtime instead would park
+            # a runtime that is still healthy.
+            builder_runtime = trace["ran"] or builder_runtime
             handoff = write_handoff(
                 workspace,
                 repo_path,
@@ -694,11 +775,26 @@ def execute_cycle(workspace) -> None:
                         "work is handed to the next cycle."
                     ),
                     "handoff": handoff,
+                    "builder_runtime": builder_runtime,
+                    "runtime_switches": trace["switches"],
                     "runtime_observations": observations,
                 }
             )
             report_phase(f"{repo_label}: runtime out of usage, work handed over")
             return
+
+        # Read before the report, because a cycle that switched runtime
+        # mid-change must not be filed under the one that ran out: the
+        # reviewers are chosen to exclude the builder's runtime, so a stale
+        # value is how a cycle ends up reviewing its own work.
+        trace = runtime_trace(
+            workspace,
+            builder_conversation_id,
+            started_on=builder_runtime,
+            finished=True,
+        )
+        builder_runtime = trace["ran"] or builder_runtime
+        observations.extend(trace["observations"])
 
         report = read_json_report(report_path) or {}
         if not report:
@@ -735,6 +831,8 @@ def execute_cycle(workspace) -> None:
             "risks": risks[:40],
             "prompt_digest": prompt_digest(builder_prompt),
             "verdict_rule_version": VERDICT_RULE_VERSION,
+            "runtime_switches": trace["switches"],
+            "runtime_observations": observations[-MAX_OBSERVATIONS:],
         }
         shas = git_commit_range(repo_path, base_ref, reported_branch)
         builder_update.update(shas)
@@ -811,6 +909,7 @@ def execute_cycle(workspace) -> None:
             )
             review_conversation_id = None
             review_error = None
+            reviewer_refused = False
             try:
                 review_conversation_id = run_conversation(
                     workspace,
@@ -828,6 +927,35 @@ def execute_cycle(workspace) -> None:
                 review_conversation_id = getattr(exc, "conversation_id", None)
                 review_error = f"{type(exc).__name__}: {exc}"
                 print(f"  reviewer {label} failed (non-fatal): {review_error}")
+                # A reviewer that ran out of usage is scheduling news, not
+                # just a missing verdict: the ledger has to learn it or the
+                # next cycle picks the same spent runtime.
+                reviewer_refused = looks_exhausted(review_error)
+
+            review_trace = runtime_trace(
+                workspace,
+                review_conversation_id,
+                started_on=reviewer["runtime"],
+                finished=review_error is None,
+            )
+            reviewer_ran = review_trace["ran"] or reviewer["runtime"]
+            if review_trace["observations"]:
+                observations.extend(review_trace["observations"])
+            elif reviewer_refused:
+                # A reviewer that ran out of usage is scheduling news, not
+                # just a missing verdict: the ledger has to learn it, or the
+                # next cycle picks the same spent runtime. The exception
+                # string is the fallback for a server too old to emit the
+                # typed events.
+                observations.append(
+                    {
+                        "runtime": reviewer_ran,
+                        "outcome": "exhausted",
+                        "observed_at": _now_iso(),
+                        "evidence": (review_error or "")[:500],
+                        "conversation_id": review_conversation_id,
+                    }
+                )
 
             review_report = read_json_report(review_path) or {}
             if not review_report and review_error is None:
@@ -839,7 +967,8 @@ def execute_cycle(workspace) -> None:
                 {
                     "profile_id": reviewer["id"],
                     "profile_name": reviewer["name"],
-                    "runtime": reviewer["runtime"],
+                    "runtime": reviewer_ran,
+                    "runtime_switches": review_trace["switches"],
                     "conversation_id": review_conversation_id,
                     "verdict": verdict,
                     # Recorded so the aggregate can tell "judged it and was
@@ -869,6 +998,11 @@ def execute_cycle(workspace) -> None:
             "status": "COMPLETED",
             "verdict": cycle_verdict(reviews),
             "reviews": reviews,
+            # Newest last and bounded, because the service caps the list: a
+            # cycle with many reviewers must not lose the reviewer that just
+            # ran out in order to re-send what the builder stage already
+            # recorded.
+            "runtime_observations": observations[-MAX_OBSERVATIONS:],
         }
         if soul_suggestions:
             # Deduplicated across stages: both runtimes noticing the same
