@@ -386,6 +386,38 @@ def looks_exhausted(text: str | None) -> bool:
     return any(marker in lowered for marker in USAGE_LIMIT_MARKERS)
 
 
+def phase_failure_notice(detail: str) -> str:
+    """What to print the first time a progress phase does not reach the service.
+
+    The phase is the only thing a person watching a run sees change, so a run
+    whose phase updates are failing looks stalled while it is working. It must
+    stay non-fatal — a cosmetic update cannot be allowed to end a cycle — but
+    it must not be silent, and the consequence is the part worth saying: the
+    dashboard is now behind, and will stay behind.
+    """
+    return (
+        f"  phase not recorded (non-fatal): {detail}\n"
+        "  the dashboard will show an earlier phase than this run is at"
+    )
+
+
+def lost_phase_summary(lost: list[str]) -> str | None:
+    """What to print at the end when phases went missing, or None if none did.
+
+    Once, at the end, where a reader comparing the dashboard against this log
+    will be looking. Only the last attempted phase: the whole list is every
+    phase of the run, and the question being answered is "how far did it
+    actually get".
+    """
+    if not lost:
+        return None
+    return (
+        f"{len(lost)} phase update(s) never reached the service, so the "
+        "dashboard stopped short of where this run got to. The last one it "
+        f"tried to report: {lost[-1]}"
+    )
+
+
 def ran_out_of_time(error: BaseException | None) -> bool:
     """Whether this failure is a run that exceeded its time, not one that broke.
 

@@ -255,6 +255,40 @@ def test_a_refusal_for_usage_is_told_apart_from_an_ordinary_failure(
     assert preset.looks_exhausted(None) is False
 
 
+def test_a_run_whose_phases_are_lost_says_the_dashboard_is_behind(
+    preset,
+) -> None:
+    """A phase that never arrives makes a working run look stalled.
+
+    The phase is the only thing a person watching sees change, and it is
+    posted best-effort because a cosmetic update must not end a cycle. That
+    made the most likely failure — an expired cycle token, answered with a
+    4xx — completely invisible: the dashboard simply stopped moving.
+    """
+    # Arrange / Act
+    first = preset.phase_failure_notice("HTTPStatusError: 401 Unauthorized")
+
+    # Assert: the error, and the consequence, because the consequence is what
+    # a reader is actually trying to explain.
+    assert "401 Unauthorized" in first
+    assert "earlier phase than this run is at" in first
+
+
+def test_the_end_of_a_run_accounts_for_every_phase_that_went_missing(
+    preset,
+) -> None:
+    # Said once at the end, naming how far the run really got, because that is
+    # the difference between the dashboard and the log that needs explaining.
+    assert preset.lost_phase_summary([]) is None
+
+    summary = preset.lost_phase_summary(["Cloning HAZARD", "Reviewing HAZARD"])
+
+    assert summary is not None
+    assert "2 phase update(s)" in summary
+    assert "Reviewing HAZARD" in summary
+    assert "Cloning HAZARD" not in summary
+
+
 def test_a_builder_that_ran_out_of_time_is_told_apart_from_one_that_broke(
     preset,
 ) -> None:
