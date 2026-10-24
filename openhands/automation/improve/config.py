@@ -105,7 +105,9 @@ class ImproveProgramConfig(BaseModel):
             "Agent profiles that review the builder's work adversarially. "
             "Leave empty to let each run pick every available runtime other "
             "than the builder's, so adding a second runtime to the server is "
-            "enough to turn review on."
+            "enough to turn review on. Naming them is how to keep the review "
+            "pool closed to the runtimes you chose; with `rotate_builder`, "
+            "the turn's own builder is skipped rather than self-reviewing."
         ),
     )
     repository_source: RepositorySource = Field(
@@ -199,7 +201,13 @@ class ImproveProgramConfig(BaseModel):
             raise ValueError(
                 "repositories is only used when repository_source is 'explicit'"
             )
-        if self.builder_profile_id in self.reviewer_profile_ids:
+        if (
+            not self.rotate_builder
+            and self.builder_profile_id in self.reviewer_profile_ids
+        ):
+            # Only with a fixed builder. Under a rotation the first builder is
+            # a reviewer on every other turn, which is the point; the
+            # rotation-aware check below is what guards that case.
             raise ValueError(
                 "the builder profile cannot also be a reviewer: a runtime "
                 "reviewing its own work is not independent review"
@@ -212,14 +220,24 @@ class ImproveProgramConfig(BaseModel):
         if len(set(self.rotate_builder)) != len(self.rotate_builder):
             raise ValueError("rotate_builder contains a duplicate")
         if self.rotate_builder and self.reviewer_profile_ids:
-            # Naming reviewers explicitly while the builder moves is a trap:
-            # on the turn a named reviewer builds, it would be asked to review
-            # itself, which is the one thing this whole design refuses.
-            raise ValueError(
-                "rotate_builder cannot be combined with explicit "
-                "reviewer_profile_ids: leave reviewers empty so each turn's "
-                "reviewers are every runtime except that turn's builder"
-            )
+            # Naming reviewers while the builder moves is allowed, and is the
+            # only way to say "these runtimes, and no others, review each
+            # other": leaving reviewers empty draws from every profile on the
+            # server, so a local model added for something else starts
+            # reviewing. A reviewer that is the current turn's builder is
+            # skipped for that turn rather than asked to review itself, so the
+            # one thing to refuse is a turn with nobody left to review it.
+            unreviewed = [
+                builder
+                for builder in self.builder_rotation
+                if not set(self.reviewer_profile_ids) - {builder}
+            ]
+            if unreviewed:
+                raise ValueError(
+                    "every builder in the rotation needs a reviewer that is "
+                    "not itself; these would build unreviewed: "
+                    + ", ".join(str(builder) for builder in unreviewed)
+                )
         if len(set(self.reviewer_profile_ids)) != len(self.reviewer_profile_ids):
             raise ValueError("reviewer_profile_ids contains a duplicate")
         return self
