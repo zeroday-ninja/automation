@@ -1160,6 +1160,9 @@ def _load_improve_preset_files() -> dict[str, str]:
             # directory: the service re-reads a reported class against the
             # same rules, so there must be exactly one copy of them. The
             # module is stdlib-only for this reason.
+            "lessons.py": (
+                Path(__file__).parent / "improve" / "lessons.py"
+            ).read_text(),
             "routing.py": (
                 Path(__file__).parent / "improve" / "routing.py"
             ).read_text(),
@@ -1193,6 +1196,7 @@ def _generate_improve_tarball() -> bytes:
         _add_file_to_tar(tar, "context.py", preset_files["context.py"])
         _add_file_to_tar(tar, "change_class.py", preset_files["change_class.py"])
         _add_file_to_tar(tar, "routing.py", preset_files["routing.py"])
+        _add_file_to_tar(tar, "lessons.py", preset_files["lessons.py"])
         _add_file_to_tar(tar, "builder_prompt.md", preset_files["builder_prompt.md"])
         _add_file_to_tar(tar, "reviewer_prompt.md", preset_files["reviewer_prompt.md"])
         _add_file_to_tar(tar, "handoff_prompt.md", preset_files["handoff_prompt.md"])

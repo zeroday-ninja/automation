@@ -249,10 +249,15 @@ def test_the_rules_ship_into_the_sandbox_that_applies_them() -> None:
     with tarfile.open(fileobj=io.BytesIO(_generate_improve_tarball())) as tar:
         shipped = set(tar.getnames())
 
-    assert {"change_class.py", "routing.py", "judge_prompt.md"} <= shipped
+    assert {
+        "change_class.py",
+        "routing.py",
+        "lessons.py",
+        "judge_prompt.md",
+    } <= shipped
 
 
-@pytest.mark.parametrize("module", ["change_class.py", "routing.py"])
+@pytest.mark.parametrize("module", ["change_class.py", "routing.py", "lessons.py"])
 def test_a_shipped_rule_module_needs_nothing_but_the_standard_library(
     module: str,
 ) -> None:

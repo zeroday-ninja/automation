@@ -229,6 +229,16 @@ class UpdateCycleRequest(BaseModel):
             "indistinguishable from a restart."
         ),
     )
+    injected_lesson_ids: list[uuid.UUID] | None = Field(
+        default=None,
+        max_length=100,
+        description=(
+            "Which corrections this cycle actually had in front of it. "
+            "Reported rather than inferred: when the same correction arrives "
+            "again, this is the only thing that tells 'the work ignored it' "
+            "apart from 'the work never saw it'."
+        ),
+    )
     gate_decisions: list[dict[str, Any]] | None = Field(
         default=None,
         max_length=40,
@@ -493,6 +503,7 @@ class CycleResponse(BaseModel):
     claimed_change_class: str | None = None
     change_evidence: dict[str, Any] | None = None
     gate_decisions: list[dict[str, Any]] | None = None
+    injected_lesson_ids: list[uuid.UUID] | None = None
     judge_attestation: dict[str, Any] | None = None
     parked_phase: str | None = None
     parked_question: str | None = None
@@ -546,6 +557,7 @@ class CycleResponse(BaseModel):
             claimed_change_class=cycle.claimed_change_class,
             change_evidence=cycle.change_evidence,
             gate_decisions=cycle.gate_decisions,
+            injected_lesson_ids=cycle.injected_lesson_ids,
             judge_attestation=cycle.judge_attestation,
             parked_phase=cycle.parked_phase,
             parked_question=cycle.parked_question,

@@ -1031,6 +1031,109 @@ class RuntimeUsageState(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+#: ``AutomationLesson.text`` is the correction's own words, which shadows the
+#: imported ``text()`` inside that class body. Bound here so both lesson tables
+#: can still default a timestamp.
+_NOW = text("CURRENT_TIMESTAMP")
+
+
+class AutomationLesson(Base):
+    """One correction, so it never has to be given twice.
+
+    A document a model forgot to read is indistinguishable from a document that
+    does not exist, which is why memory alone does not stop repetition. These
+    rows are what make the identity documents *complete*: each is a correction
+    that actually happened, with the scope it applies to and a link to the work
+    that caused it.
+
+    A correction the user *made* lands here without being asked for. An agent's
+    guess about their preferences is a ``soul_suggestion`` on a cycle, which is
+    a proposal they accept or discard -- a deliberately different thing.
+    """
+
+    __tablename__ = "automation_lesson"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+
+    #: ``user`` | ``project`` | ``runtime`` | ``surface``.
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    #: The repository, runtime or surface it is about. Null means every
+    #: subject in this scope, which is what it means when the correction did
+    #: not name one.
+    subject: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    #: What produced it. Every trigger is something that already happens: no
+    #: part of this asks the user to write a lesson.
+    trigger: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    #: The user's words, verbatim. Paraphrasing a correction is how it comes
+    #: back as something they have to give again.
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    why: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    #: A lesson that can be checked becomes a check, and a model that skims
+    #: the document still fails the check. This is the stage that actually
+    #: ends repetition.
+    mechanised: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    check_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    status: Mapped[str] = mapped_column(String(16), default="active", nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=_NOW,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=_NOW,
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        # The one question a cycle asks: what am I under, here.
+        Index(
+            "ix_automation_lesson_scope",
+            "org_id",
+            "status",
+            "scope",
+            "subject",
+        ),
+    )
+
+
+class AutomationLessonIncident(Base):
+    """A correction that arrived twice, and which stage let it through.
+
+    This is what makes the lesson pipeline a learning mechanism rather than a
+    memory one. Repetition is a defect, and a defect with no diagnosis is a
+    complaint: the stage names which of capture, scope, injection, attention
+    or mechanisation failed, so there is something to fix.
+    """
+
+    __tablename__ = "automation_lesson_incident"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    lesson_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automation_lesson.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    similarity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=_NOW,
+        nullable=False,
+    )
+
+
 class AutomationRuntimeUsage(Base):
     """What is known about one agent runtime's remaining usage.
 
@@ -1249,6 +1352,12 @@ class AutomationImproveCycle(Base):
     judge_attestation: Mapped[dict[str, Any] | None] = mapped_column(
         JSON, nullable=True
     )
+
+    #: Which corrections this cycle had in front of it. Stored because it is
+    #: what diagnoses a repeat: a correction arriving twice is either one the
+    #: work never saw or one it saw and went against, and only this tells
+    #: those apart.
+    injected_lesson_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
 
     # --- Routing -------------------------------------------------------
     # Where each gate sent the work, and why. Append-only: a verdict says
