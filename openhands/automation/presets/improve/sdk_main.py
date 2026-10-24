@@ -1488,6 +1488,11 @@ def execute_cycle(workspace) -> None:
             )
 
         # --- Publish gate ---------------------------------------------------
+        # The reviews go first. The service decides publishing authority from
+        # them, and asking before reporting them means asking a service that
+        # has not been told what the reviewers concluded -- which is how an
+        # additive change with changes requested against it got merged.
+        report_cycle({"verdict": verdict, "reviews": reviews})
         authority = cycle_authority(cycle_id)
         decisions.append(
             gate(

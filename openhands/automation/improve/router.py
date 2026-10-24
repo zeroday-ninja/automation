@@ -804,6 +804,7 @@ async def get_cycle_authority(
     cycle = await _load_cycle(session, cycle_id, user)
     authority = resolve_authority(
         change_class=cycle.change_class,
+        verdict=cycle.verdict.value if cycle.verdict else None,
         head_sha=cycle.head_sha,
         changed_files=cycle.changed_files,
         checks=cycle.checks,
