@@ -65,15 +65,16 @@ Routes: `POST /api/automation/v1/preset/improve`, `POST /api/automation/v1/impro
 - `F19.refresh-code`: `POST .../refresh-code` repackages the runner from this build without touching the program's configuration, so a service upgrade reaches an existing program; it needs `manage_automations`.
 - `F19.usage-ledger`: `GET /v1/improve/runtime-usage` answers which runtimes have usage left, with the evidence behind each reading — what was last seen, when it last refused, how many times in a row, and whether the reset time came from the runtime or from a default cooldown. Recovery is applied at read time, so an exhaustion whose reset has passed reads as available while the exhaustion stays on the record.
 - `F19.usage-unknown`: a runtime nobody has observed is absent rather than reported healthy, and `unknown` stays distinct from `available` — nothing having gone wrong is not the same as something having gone right.
-- `F19.builder-share`: `GET /v1/improve/builder-share` answers how evenly the building was divided between runtimes over a window of `days`: each runtime's cycles and its share of them, and `evenness_gap`, the widest share's distance from an even split in percentage points, against the `target_gap: 20.0` the plan asks for, carried with the answer so a reader does not have to know it. Counted from each cycle's builder of record, which is the runtime that actually ran rather than the one the profile named, and `null` rather than a gap of zero when nothing was built.
+- `F19.builder-share`: `GET /v1/improve/builder-share` answers how evenly the building was divided between runtimes over a window of `days`, across every program in the org: each runtime's cycles and its share of them, and `evenness_gap`, the widest share's distance from an even split in percentage points, against the `target_gap: 20.0` the plan asks for, carried with the answer so a reader does not have to know it. Counted from each cycle's builder of record, which is the runtime that actually ran rather than the one the profile named, and `null` rather than a gap of zero when nothing was built.
 - `F19.builder-share-not-yet`: `days_covered` travels with that answer and `within_target` is null, not false, until it reaches the window: a week asked of a day of history still reports the gap and withholds the verdict, because an unmet measure and an unmeasurable one are different answers.
+- `F19.builder-share-scoped`: `automation_id` scopes that answer to one program, echoes the id back and reports `configured_builders` beside it, and changes what "even" measures against: the denominator is the larger of the runtimes seen and the runtimes the program is configured to rotate, so a program running one of its three is a 66.7-point gap where the org-wide reading calls the same cycles a perfect split. Both fields are null unscoped, because there is then no single configuration for "even" to mean anything against, and an `automation_id` that is not a program's is an error rather than quietly the whole org.
 - `F19.parked-list`: `GET /v1/improve/parked` answers everything waiting for a person across every program in the org, because the question is "what is waiting on me" and an answer that needs the reader to know which program to look in is not an answer.
 - `F19.resolve`: `POST .../resolve` records a person's answer with a required reason and returns the cycle to the phase it stopped at; `archive` ends it as COMPLETED with a REJECTED verdict, because a decision is not a malfunction. It needs `manage_automations` — the point of escalating is that the thing being gated is not the thing that answers.
 - `F19.resolve-not-escalate`: `escalate` is refused as an answer: that endpoint *is* the escalation, so escalating again would park the cycle on the person who just unparked it.
 - `F19.resolve-not-parked`: resolving a cycle that is not PARKED answers 409 rather than silently doing nothing.
 - `F19.attest`: `POST .../attest` records the judge's verdict on a deletion, with each removal accounted for as dead, replaced or covered and a `where` that can be checked; attesting with no removals named is refused, because signing off a set of removals without naming them is signing off nothing.
 - `F19.attest-not-the-author`: an attestation from the runtime that built the change is refused 409. The service checks what actually signed rather than trusting the configuration, because a rotation moves the builder between cycles and a model favours its own output.
-- `F19.authority`: `GET .../authority` answers whether a change may publish, and what is standing in the way. Additive publishes on its own account; a deletion needs the judge's attestation; a breaking change is never authorised from here for anybody, and says so with `human_only` rather than as "not yet".
+- `F19.authority`: `GET .../authority` answers whether a change may publish, and what is standing in the way. Additive publishes on its own account; a deletion needs the judge's attestation; a breaking change is never authorised from here for anybody, and says so with `human_only` rather than as "not yet". A change whose review has not been recorded yet is returned with `missing: [verdict]` ahead of all of that, because authority is not a thing to collect before the review that decides it.
 - `F19.authority-evidence`: a change that cannot show a check that actually *passed* is returned as a proposal with the gaps named, and a check that *failed* is answered separately — it is evidence, not missing evidence.
 - `F19.gate-log`: every routing decision is appended with its route, trigger and required rationale; a decision the service cannot read is recorded as unreadable with the problem rather than dropped, because a client with a bug must not look like one that never decided anything.
 - `F19.change-class`: the change class is stored with the evidence it was computed from, and a report whose class contradicts its own evidence is stored at the restrictive reading — the thing being gated does not lower its own gate.
@@ -172,13 +173,18 @@ Preconditions:
   test "$(tar tzf "$AUTOMATION_VERIFY_RUN/qa-improve.tar" | sort | paste -sd, -)" = builder_prompt.md,change_class.py,context.py,handoff_prompt.md,judge_prompt.md,lessons.py,main.py,report.py,reviewer_prompt.md,routing.py,setup.sh
   tar tvzf "$AUTOMATION_VERIFY_RUN/qa-improve.tar" setup.sh | grep -q '^-rwxr-xr-x'
   tar xzOf "$AUTOMATION_VERIFY_RUN/qa-improve.tar" setup.sh | grep -q 'sdk-version'
-  tar xzOf "$AUTOMATION_VERIFY_RUN/qa-improve.tar" main.py | grep -q '/v1/improve/{automation_id}/claim'
-  tar xzOf "$AUTOMATION_VERIFY_RUN/qa-improve.tar" main.py | grep -q '/v1/improve/cycles/'
-  if tar xzOf "$AUTOMATION_VERIFY_RUN/qa-improve.tar" main.py | grep -q "$BUILDER"; then false; fi
+  tar xzOf "$AUTOMATION_VERIFY_RUN/qa-improve.tar" main.py > "$AUTOMATION_VERIFY_RUN/qa-improve-main.py"
+  grep -q '/v1/improve/{automation_id}/claim' "$AUTOMATION_VERIFY_RUN/qa-improve-main.py"
+  grep -q '/v1/improve/cycles/' "$AUTOMATION_VERIFY_RUN/qa-improve-main.py"
+  if grep -q "$BUILDER" "$AUTOMATION_VERIFY_RUN/qa-improve-main.py"; then false; fi
   if tar xzOf "$AUTOMATION_VERIFY_RUN/qa-improve.tar" builder_prompt.md | grep -q 'qa.invalid'; then false; fi
   ```
   `tar tzf` (gzip) is required although the response says
-  `application/x-tar`. The two negative greps are the packaging contract:
+  `application/x-tar`. `main.py` is extracted to a file before it is grepped
+  because it is now larger than a pipe buffer: `grep -q` stops at the first
+  match, `tar` then dies writing the rest of the file, and `pipefail` reports
+  that SIGPIPE as a failed line even though the string was found. The two
+  negative greps are the packaging contract:
   profiles and repositories reach the run through its claim, so editing a
   program never has to regenerate this tarball.
 - **Program validation (`F19.create-validation`).** Each refused body creates nothing.
@@ -194,7 +200,7 @@ Preconditions:
   control-automation api POST /v1/preset/improve --json "{\"name\":\"qa iv\",\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"},\"improve\":{\"builder_profile_id\":\"$BUILDER\",\"repository_source\":\"explicit\"}}" --expect 422 --check detail.0.msg contains "repositories must list at least one repository when repository_source is 'explicit'" --save F19.create-validation/explicit-empty
   control-automation api POST /v1/preset/improve --json "{\"name\":\"qa iv\",\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"},\"improve\":{\"builder_profile_id\":\"$BUILDER\",\"repository_source\":\"explicit\",\"repositories\":[{\"label\":\"a\",\"url\":\"https://qa.invalid/a.git\"}],\"repository_labels\":[\"a\"]}}" --expect 422 --check detail.0.msg contains 'repository_labels filters Git Sync remotes and cannot be combined'
   control-automation api POST /v1/preset/improve --json "{\"name\":\"qa iv\",\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"},\"improve\":{\"builder_profile_id\":\"$BUILDER\",\"repositories\":[{\"label\":\"a\",\"url\":\"https://qa.invalid/a.git\"}]}}" --expect 422 --check detail.0.msg contains "repositories is only used when repository_source is 'explicit'"
-  control-automation api POST /v1/preset/improve --json "{\"name\":\"qa iv\",\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"},\"improve\":{\"builder_profile_id\":\"$BUILDER\",\"repository_source\":\"explicit\",\"repositories\":[{\"label\":\"a\",\"url\":\"ftp://qa.invalid/a.git\"}]}}" --expect 422 --check detail.0.msg contains 'url must start with one of: https://, http://, ssh://, git@, file://'
+  control-automation api POST /v1/preset/improve --json "{\"name\":\"qa iv\",\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"},\"improve\":{\"builder_profile_id\":\"$BUILDER\",\"repository_source\":\"explicit\",\"repositories\":[{\"label\":\"a\",\"url\":\"ftp://qa.invalid/a.git\"}]}}" --expect 422 --check detail.0.msg contains 'url must start with one of: https://, git@, file://'
   control-automation api POST /v1/preset/improve --json "{\"name\":\"qa iv\",\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"},\"improve\":{\"builder_profile_id\":\"$BUILDER\",\"branch_prefix\":\"/qa/\"}}" --expect 422 --check detail.0.msg contains 'branch_prefix must be a valid git ref prefix'
   control-automation api POST /v1/preset/improve --json "{\"name\":\"qa iv\",\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"},\"improve\":{\"builder_profile_id\":\"$BUILDER\",\"branch_prefix\":\"qa improve/\"}}" --expect 422 --check detail.0.msg contains 'branch_prefix contains characters git forbids in a ref'
   control-automation api POST /v1/preset/improve --json "{\"name\":\"qa iv\",\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"},\"improve\":{\"builder_profile_id\":\"$BUILDER\",\"max_changed_files\":501}}" --expect 422 --check detail.0.msg contains 'less than or equal to 500'
@@ -203,7 +209,11 @@ Preconditions:
   ```
   `repository_source` and its list are validated together: each source needs
   its own field and refuses the other's, so a program cannot say `git_sync`
-  and carry an explicit list that silently never runs.
+  and carry an explicit list that silently never runs. The cloneable prefixes
+  are `https://`, `git@` and `file://` and the refusal names them: `http://`
+  is refused rather than silently upgraded, and `ssh://` is not something a
+  cycle can clone, so neither is accepted at creation only to fail at 3am
+  inside a run.
 - **Change what a program does (`F19.config-replace`).** A whole new configuration, the rotation it produces, and the next cycle running on it.
   ```sh
   CFG=$(control-automation api POST /v1/preset/improve --json "{\"name\":\"qa improve editable\",\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"},\"improve\":{\"builder_profile_id\":\"$BUILDER\",\"repository_source\":\"explicit\",\"repositories\":[{\"label\":\"qa one\",\"url\":\"https://qa.invalid/one.git\"},{\"label\":\"qa two\",\"url\":\"https://qa.invalid/two.git\"}]}}" --expect 201 --field id)
@@ -439,11 +449,14 @@ Preconditions:
   ```sh
   EID=$(control-automation api POST /v1/preset/improve --json "{\"name\":\"qa improve empty\",\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"},\"improve\":{\"builder_profile_id\":\"$BUILDER\",\"repository_labels\":[\"qa no such repository\"]}}" --expect 201 --field id)
   control-automation api GET "/v1/improve/$EID/rotation" --expect 200 --check repositories len-eq 0 --check next_index eq null --check last_cycle eq null --check config.repository_labels.0 eq 'qa no such repository' --save F19.rotation-empty/rotation
-  control-automation api POST "/v1/improve/$EID/claim" --json '{}' --expect 409 --check detail eq 'the program has no repositories to rotate over' --save F19.rotation-empty/claim
+  control-automation api POST "/v1/improve/$EID/claim" --json '{}' --expect 409 --check detail.code eq no_repositories --check detail.message eq 'the program has no repositories to rotate over' --save F19.rotation-empty/claim
   control-automation api GET "/v1/improve/$EID/cycles" --expect 200 --check total eq 0 --check cycles len-eq 0
   ```
   The run reads this 409 as "nothing to do" and still completes, so a program
-  created before its repositories exist does not fail every night.
+  created before its repositories exist does not fail every night. The detail
+  is a typed object rather than a sentence because `no_repositories` is only
+  one of the clean no-ops a claim answers with: a run that could read prose
+  alone could not tell "add a repository" from "this one is done for today".
 - **Continuing from the recorded position (`F19.claim-index-fallback`).** The repository the last cycle took is gone.
   Requires: `F19.rotation-git-sync`
   ```sh
@@ -555,10 +568,45 @@ Preconditions:
   still reported. `days` is clamped rather than refused, so `days=0` asks
   about today, and only a value that is not an integer is a 422.
 
+- **One program's rotation, not the whole machine's (`F19.builder-share-scoped`).**
+  The same cycles, asked about the org and about the program that ran them.
+  Requires: `F19.builder-share`
+  ```sh
+  SID=$(control-automation api POST /v1/preset/improve --json "{\"name\":\"qa improve rotating builder\",\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"},\"improve\":{\"builder_profile_id\":\"$BUILDER\",\"rotate_builder\":[\"$REVIEWER\",\"33333333-3333-4333-8333-333333333333\"],\"repository_source\":\"explicit\",\"repositories\":[{\"label\":\"qa gamma\",\"url\":\"https://qa.invalid/gamma.git\"},{\"label\":\"qa delta\",\"url\":\"https://qa.invalid/delta.git\"}]}}" --expect 201 --check preset_metadata.improve.rotate_builder len-eq 2 --field id)
+  SC1=$(control-automation api POST "/v1/improve/$SID/claim" --json '{}' --expect 201 --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$SC1" --json '{"status":"BUILDING","builder_runtime":"qa-runtime-one"}' --expect 200
+  SC2=$(control-automation api POST "/v1/improve/$SID/claim" --json '{}' --expect 201 --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$SC2" --json '{"status":"BUILDING","builder_runtime":"qa-runtime-one"}' --expect 200
+  control-automation api GET /v1/improve/builder-share --query days=1 --query "automation_id=$SID" --expect 200 --check automation_id eq "$SID" --check configured_builders eq 3 --check cycles eq 2 --check runtimes len-eq 1 --check runtimes.0.runtime eq qa-runtime-one --check runtimes.0.share eq 1.0 --check evenness_gap eq 66.7 --check within_target eq false --save F19.builder-share-scoped/one-of-three
+  control-automation api GET /v1/improve/builder-share --query days=1 --expect 200 --check automation_id eq null --check configured_builders eq null --check cycles eq 6 --check runtimes len-eq 2 --check evenness_gap eq 0.0 --check within_target eq true --save F19.builder-share-scoped/org-wide
+  control-automation api PUT "/v1/improve/$SID/config" --json "{\"builder_profile_id\":\"$BUILDER\",\"repository_source\":\"explicit\",\"repositories\":[{\"label\":\"qa gamma\",\"url\":\"https://qa.invalid/gamma.git\"},{\"label\":\"qa delta\",\"url\":\"https://qa.invalid/delta.git\"}]}" --expect 200 --check config.rotate_builder len-eq 0
+  control-automation api GET /v1/improve/builder-share --query days=1 --query "automation_id=$SID" --expect 200 --check configured_builders eq 1 --check cycles eq 2 --check evenness_gap eq 0.0 --check within_target eq true --save F19.builder-share-scoped/one-builder
+  control-automation api GET /v1/improve/builder-share --query days=1 --query automation_id=00000000-0000-0000-0000-000000000f19 --expect 404 --check detail eq 'Automation not found'
+  control-automation api GET /v1/improve/builder-share --query days=1 --query automation_id=qa-not-a-uuid --expect 422 --check detail.0.type eq uuid_parsing
+  ```
+  Two cycles, both built by `qa-runtime-one`, on a program configured to
+  rotate three. Scoped that is a 66.7-point gap and `within_target: false`,
+  because the denominator is the larger of the runtimes seen and
+  `configured_builders`: a configured runtime that never builds widens the gap
+  by its own absence, which is the collapse the rotation exists to prevent.
+  The *same* cycles read unscoped land on the other side of the verdict —
+  three each for two runtimes across both programs, `evenness_gap: 0.0`, the
+  machine reading as perfectly even while one of its programs runs on a third
+  of its rotation. That is what the parameter is for, and why both
+  `automation_id` and `configured_builders` come back null when nobody asked
+  about a program: there is then no configuration for "even" to mean anything
+  against. Replacing the configuration without `rotate_builder` leaves those
+  two cycles at `evenness_gap: 0.0` and `configured_builders: 1`, so the
+  denominator is the configuration rather than the history and a program that
+  only ever had one builder is not failing a rotation it never asked for.
+  Scoping asks about a program, so an id that is not one is answered like the
+  program routes (404, and 422 for an id that is not a UUID) instead of
+  quietly widening back to the org.
+
 - **Park a change and answer it (`F19.parked-list`, `F19.resolve`, `F19.resolve-not-escalate`, `F19.resolve-not-parked`, `F19.gate-log`).**
   Requires: `F19.create`
   ```sh
-  PCID=$(control-automation api POST "/v1/improve/$AID/claim" --expect 201 --field cycle.id)
+  PCID=$(control-automation api POST "/v1/improve/$AID/claim" --json '{}' --expect 201 --field cycle.id)
   control-automation api PATCH "/v1/improve/cycles/$PCID" --json '{"status":"PARKED","change_class":"breaking","branch":"improve/envelope","parked_phase":"publish","parked_question":"Publish the rename now, or wait?","parked_plan":{"breaks":["the 1.55 client"],"rollback":"revert the branch"},"gate_decisions":[{"phase":"publish","route":"escalate","trigger":"the diff is a breaking change","rationale":"a wire contract changed"},{"phase":"publish","route":"merge-it","rationale":"nonsense"}]}' --expect 200 --check gate_decisions len-eq 2 --check gate_decisions.1.unreadable eq true
   control-automation api GET /v1/improve/parked --expect 200 --check total eq 1 --check cycles.0.parked_plan.rollback matches 'revert the branch'
   control-automation api POST "/v1/improve/cycles/$PCID/resolve" --json '{"route":"escalate","resolution":"ask someone else"}' --expect 422
@@ -568,24 +616,31 @@ Preconditions:
 
 - **A deletion needs a signature that is not the author's (`F19.attest`, `F19.attest-not-the-author`, `F19.authority`, `F19.change-class`).**
   Requires: `F19.create`
-  Requires: `F19.create`
   ```sh
-  DCID=$(control-automation api POST "/v1/improve/$AID/claim" --expect 201 --field cycle.id)
+  DCID=$(control-automation api POST "/v1/improve/$AID/claim" --json '{}' --expect 201 --field cycle.id)
   control-automation api PATCH "/v1/improve/cycles/$DCID" --json '{"status":"REVIEWING","builder_runtime":"claude-code","change_class":"additive","change_evidence":{"reasons":[{"rule":"removed_export","path":"a.py","detail":"-def gone():"}]},"head_sha":"a1b2c3d","changed_files":["a.py"],"checks":[{"command":"pytest","passed":true}],"summary":"removed the unused resolver"}' --expect 200 --check change_class eq breaking --check claimed_change_class eq null
   control-automation api GET "/v1/improve/cycles/$DCID/authority" --expect 200 --check authorised eq false --check human_only eq true --check route eq escalate
   control-automation api PATCH "/v1/improve/cycles/$DCID" --json '{"change_class":"deleting","change_evidence":{"reasons":[{"rule":"file_deleted","path":"a.py","detail":"the whole file was removed"}]}}' --expect 200 --check change_class eq deleting
+  control-automation api GET "/v1/improve/cycles/$DCID/authority" --expect 200 --check authorised eq false --check missing.0 eq verdict --check reason matches 'No review has been recorded'
+  control-automation api PATCH "/v1/improve/cycles/$DCID" --json '{"verdict":"ACCEPTED"}' --expect 200 --check verdict eq ACCEPTED --check completed_at eq null
   control-automation api GET "/v1/improve/cycles/$DCID/authority" --expect 200 --check authorised eq false --check missing.0 eq judge_attestation
   control-automation api POST "/v1/improve/cycles/$DCID/attest" --json '{"attested":true,"runtime":"claude-code","summary":"looks dead","removals":[{"path":"a.py","finding":"dead","where":"grep returns only the definition"}]}' --expect 409
   control-automation api POST "/v1/improve/cycles/$DCID/attest" --json '{"attested":true,"runtime":"codex","summary":"all fine"}' --expect 422
   control-automation api POST "/v1/improve/cycles/$DCID/attest" --json '{"attested":true,"runtime":"codex","summary":"nothing imports it","removals":[{"path":"a.py","finding":"dead","where":"grep returns only the definition"}]}' --expect 200 --check judge_attestation.runtime eq codex
   control-automation api GET "/v1/improve/cycles/$DCID/authority" --expect 200 --check authorised eq true --check reason matches codex
   ```
+  The gates answer in their own order, and the recipe walks it: a breaking
+  change is refused before anything is asked of the change, and once the class
+  is a deletion the next thing standing in the way is the review rather than
+  the judge. So the cycle records `ACCEPTED` first — a verdict alone leaves
+  `completed_at` null, because only a terminal `status` finishes a cycle —
+  and the attestation is then the only thing left.
 
 - **Evidence that was never produced is a proposal, not a merge (`F19.authority-evidence`).**
   Requires: `F19.create`
   ```sh
-  ECID=$(control-automation api POST "/v1/improve/$AID/claim" --expect 201 --field cycle.id)
-  control-automation api PATCH "/v1/improve/cycles/$ECID" --json '{"status":"REVIEWING","builder_runtime":"codex","change_class":"additive","head_sha":"b2c3d4e","changed_files":["b.py"],"summary":"added a thing"}' --expect 200
+  ECID=$(control-automation api POST "/v1/improve/$AID/claim" --json '{}' --expect 201 --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$ECID" --json '{"status":"REVIEWING","builder_runtime":"codex","change_class":"additive","verdict":"ACCEPTED","head_sha":"b2c3d4e","changed_files":["b.py"],"summary":"added a thing"}' --expect 200
   control-automation api GET "/v1/improve/cycles/$ECID/authority" --expect 200 --check authorised eq false --check missing.0 eq checks --check reason matches proposal
   control-automation api PATCH "/v1/improve/cycles/$ECID" --json '{"checks":[{"command":"npm run lint","passed":false}]}' --expect 200
   control-automation api GET "/v1/improve/cycles/$ECID/authority" --expect 200 --check route eq cycle --check reason matches 'did not pass'
@@ -626,13 +681,17 @@ Preconditions:
   labels, as these recipes do, instead of assuming the order the remotes were
   created in: SQLite stores `created_at` to the second, so remotes created in
   the same second are ordered by their random id.
-- `GET /v1/improve/builder-share` divides by the runtimes that *built*
-  something in the window, not by the runtimes a program is configured with,
-  so one runtime holding every cycle reads as `evenness_gap: 0.0` and, once
-  the window is covered, `within_target: true` — the first reading in the
-  builder-share bullet is exactly that shape. Read `runtimes` beside the gap,
-  as that bullet does: a rotation that has collapsed to a single runtime is
-  the thing the program exists to fix, and the gap alone calls it even.
+- `GET /v1/improve/builder-share` asked without `automation_id` divides by
+  the runtimes that *built* something in the window, not by the runtimes a
+  program is configured with, so one runtime holding every cycle reads as
+  `evenness_gap: 0.0` and, once the window is covered, `within_target: true` —
+  the first reading in the builder-share bullet is exactly that shape. Read
+  `runtimes` beside the gap, as that bullet does: a rotation that has
+  collapsed to a single runtime is the thing the program exists to fix, and
+  the gap alone calls it even. Ask with `?automation_id=` for the reading that
+  divides by `configured_builders` when that is the larger number, which is
+  the only one that can see that collapse — and the only one that leaves out
+  the org's other programs, its disabled ones and this harness's own cycles.
 - `days_covered` counts from the oldest cycle inside the window, so every
   cycle a replay creates is "today" and a seven-day verdict is unreachable in
   one run; ask for `days=1` to see `within_target` resolve. `days` is clamped
