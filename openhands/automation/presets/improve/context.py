@@ -507,6 +507,62 @@ def save_work_in_progress(
     return saved
 
 
+#: Longest prose handoff carried onto a branch, in characters.
+#:
+#: The prompt asks for under 500 words; this is the bound for an agent that
+#: overshot. A commit message nobody can read in `git log` is the same as no
+#: commit message.
+MAX_HANDOFF_PROSE = 4000
+
+
+def commit_handoff_prose(repo_path: str, branch: str, prose: str) -> bool:
+    """Put the handoff's prose on the branch, where the plan says it lives.
+
+    The dying runtime is asked for four things in order, and the second is "a
+    short prose handoff". It wrote one to `.improve-cycle/handoff.md` — the
+    cycle's scratch directory, a *sibling* of the clone — and nothing ever
+    read it. The directory went with the sandbox, so the last tokens of an
+    exhausted runtime bought 500 words nobody could ever see.
+
+    Carried as a commit message rather than a file: it belongs to the branch
+    and not to the project, `git log` is where somebody picking up a branch
+    looks, and a file would have to be remembered and deleted by whoever
+    finishes the work.
+
+    An empty commit, because the code was already committed and pushed first
+    — that order is the plan's ("the code is worth more than the description
+    of it, so it is secured first") and amending would mean force-pushing a
+    branch another cycle may already have fetched.
+    """
+    text = (prose or "").strip()
+    if not text:
+        return False
+    if len(text) > MAX_HANDOFF_PROSE:
+        text = text[:MAX_HANDOFF_PROSE] + "\n\n[truncated]"
+    message = f"wip: handing off {branch}\n\n{text}"
+    for args, timeout in (
+        (["commit", "--allow-empty", "--no-verify", "-m", message], 180),
+        (["push", "origin", branch], 300),
+    ):
+        try:
+            result = subprocess.run(
+                ["git", "-C", repo_path, *args],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"  could not put the handoff prose on {branch}: {exc}")
+            return False
+        if result.returncode != 0:
+            detail = result.stderr.strip()[:200]
+            print(f"  could not put the handoff prose on {branch}: {detail}")
+            return False
+    print(f"  the handoff's own words are on {branch}")
+    return True
+
+
 def prompt_digest(prompt: str) -> str:
     """A fingerprint of the rendered prompt.
 

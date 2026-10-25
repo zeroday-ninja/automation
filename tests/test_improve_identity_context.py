@@ -689,3 +689,50 @@ def test_the_builder_is_told_not_to_commit_the_users_memory(preset) -> None:
 
     assert "never goes into a repository" in prompt
     assert "~/.openhands/soul/MEMORY.md" in prompt
+
+
+def test_the_handoff_prose_lands_on_the_branch(preset, tmp_path) -> None:
+    """Step 2 of the four a dying runtime is asked for, which had nowhere to go.
+
+    It wrote `.improve-cycle/handoff.md` — the cycle's scratch directory, a
+    sibling of the clone — and nothing read it. The directory went with the
+    sandbox, so the last tokens of an exhausted runtime bought 500 words
+    nobody could ever see.
+
+    On the branch as a commit message: it belongs to the branch rather than
+    the project, `git log` is where somebody picking one up looks, and a file
+    would have to be remembered and deleted by whoever finishes the work.
+    """
+    # Arrange
+    import subprocess
+
+    work = _repo_with_a_remote(tmp_path)
+    git = ["git", "-C", str(work)]
+    subprocess.run([*git, "checkout", "-q", "-b", "improve/handing-over"], check=True)
+
+    # Act
+    carried = preset.commit_handoff_prose(
+        str(work),
+        "improve/handing-over",
+        "Tried the polling loop; it deadlocks under two writers.",
+    )
+
+    # Assert: on the branch, and on the remote where the next sandbox can
+    # read it.
+    assert carried is True
+    log = subprocess.run(
+        [*git, "log", "-1", "--pretty=%B", "origin/improve/handing-over"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "deadlocks under two writers" in log
+
+
+def test_nothing_is_committed_when_the_runtime_wrote_no_prose(preset, tmp_path) -> None:
+    # An exhausted runtime often has nothing left to say, and an empty commit
+    # saying nothing is worse than no commit: it reads as a handoff that was
+    # written and said nothing, rather than one that was never written.
+    work = _repo_with_a_remote(tmp_path)
+
+    assert preset.commit_handoff_prose(str(work), "improve/x", "   \n") is False
