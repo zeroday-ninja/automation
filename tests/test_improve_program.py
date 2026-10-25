@@ -1210,6 +1210,36 @@ class TestRotatingTheBuilder:
         # anything. Taking turns is what puts each one on the other side.
         assert builders == [BUILDER, REVIEWER, BUILDER]
 
+    async def test_two_programs_do_not_both_pick_the_same_runtime(
+        self, async_client
+    ):
+        """A runtime is one subscription, however many programs use it.
+
+        The headroom bias asked "who has built least **for me** today", so
+        two programs could each hand the turn to the same runtime and neither
+        would know. It is the lesson the daily cap already learned — *"across
+        the organization rather than per program: three programs each taking
+        their own allowance is the runaway this is here to prevent"* — and
+        the bias beside it was still counting per program.
+
+        Live on 2026-10-25 five programs contributed cycles, and the day came
+        out even by luck rather than by design.
+        """
+        # Arrange: two programs over the same two builders.
+        await add_remote(async_client, "https://github.com/acme/first", "first")
+        one = await create_program(async_client, rotate_builder=[REVIEWER])
+        two = await create_program(async_client, rotate_builder=[REVIEWER])
+
+        # Act: the first program takes its first turn, then the second takes
+        # its own — which, counting only its own history, is also a first.
+        first = (await claim(async_client, one["id"])).json()["cycle"]
+        second = (await claim(async_client, two["id"])).json()["cycle"]
+
+        # Assert: the second program sees that the runtime has already built
+        # today and gives the turn to the one that has not.
+        assert first["builder_profile_id"] == BUILDER
+        assert second["builder_profile_id"] == REVIEWER
+
     async def test_the_rotation_can_name_itself_as_the_review_pool(self, async_client):
         # The only way to say "these runtimes, and no others": an empty
         # reviewer list draws from every profile on the server, so a local

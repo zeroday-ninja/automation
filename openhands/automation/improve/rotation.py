@@ -271,6 +271,13 @@ async def builders_today(
 
     The program's own day, not a rolling window: the cap it sits beside is
     counted that way, and two clocks would disagree at the boundary.
+
+    Across the organization rather than per program, which is the lesson the
+    cap beside it already learned. A runtime is one subscription however many
+    programs use it, so a bias that asked "who has built least *for me*"
+    let two programs hand the turn to the same runtime with neither of them
+    knowing. Five programs contributed cycles on 2026-10-25 and the day came
+    out even by luck.
     """
     start, _ = local_day_bounds(timezone_name, now)
     rows = (
@@ -280,7 +287,7 @@ async def builders_today(
                 func.count(),
             )
             .where(
-                AutomationImproveCycle.automation_id == automation.id,
+                AutomationImproveCycle.org_id == automation.org_id,
                 AutomationImproveCycle.created_at >= start,
                 AutomationImproveCycle.builder_profile_id.is_not(None),
             )
