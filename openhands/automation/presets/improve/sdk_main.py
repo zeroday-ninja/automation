@@ -151,6 +151,7 @@ from context import (  # noqa: E402
     git_commit_range,
     identity_sections,
     branch_is_pushed,
+    commit_handoff_prose,
     normalize_checks,
     project_identity_sections,
     prompt_digest,
@@ -774,6 +775,18 @@ def write_handoff(
             run_conversation(workspace, builder_id, prompt, f"Hand off {repo_label}")
         except Exception as exc:  # noqa: BLE001 - nothing here may fail the cycle
             print(f"  the runtime could not write its own handoff: {exc}")
+
+    # The prose, onto the branch. Step 2 of the four the handoff prompt asks
+    # for, and until now the only one with nowhere to land: it was written to
+    # the cycle's scratch directory, which is a sibling of the clone and goes
+    # with the sandbox, and nothing ever read it.
+    prose_path = os.path.join(cycle_dir, "handoff.md")
+    if saved.get("pushed") and os.path.exists(prose_path):
+        try:
+            with open(prose_path, encoding="utf-8") as handle:
+                commit_handoff_prose(repo_path, branch, handle.read())
+        except OSError as exc:
+            print(f"  could not read the handoff prose: {exc}")
 
     written = read_json_report(os.path.join(cycle_dir, "handoff.json")) or {}
     shas = git_commit_range(repo_path, base_ref, branch)
