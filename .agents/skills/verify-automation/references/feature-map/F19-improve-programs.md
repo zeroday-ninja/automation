@@ -32,6 +32,7 @@ Routes: `POST /api/automation/v1/preset/improve`, `POST /api/automation/v1/impro
 `POST /api/automation/v1/improve/{automation_id}/refresh-code`,
 `GET /api/automation/v1/improve/runtime-usage`,
 `GET /api/automation/v1/improve/builder-share`,
+`GET /api/automation/v1/improve/provenance`,
 `GET /api/automation/v1/improve/parked`,
 `POST /api/automation/v1/improve/cycles/{cycle_id}/resolve`,
 `POST /api/automation/v1/improve/cycles/{cycle_id}/attest`,
@@ -68,6 +69,8 @@ Routes: `POST /api/automation/v1/preset/improve`, `POST /api/automation/v1/impro
 - `F19.builder-share`: `GET /v1/improve/builder-share` answers how evenly the building was divided between runtimes over a window of `days`, across every program in the org: each runtime's cycles and its share of them, and `evenness_gap`, the widest share's distance from an even split in percentage points, against the `target_gap: 20.0` the plan asks for, carried with the answer so a reader does not have to know it. Counted from each cycle's builder of record, which is the runtime that actually ran rather than the one the profile named, and `null` rather than a gap of zero when nothing was built.
 - `F19.builder-share-not-yet`: `days_covered` travels with that answer and `within_target` is null, not false, until it reaches the window: a week asked of a day of history still reports the gap and withholds the verdict, because an unmet measure and an unmeasurable one are different answers.
 - `F19.builder-share-scoped`: `automation_id` scopes that answer to one program, echoes the id back and reports `configured_builders` beside it, and changes what "even" measures against: the denominator is the larger of the runtimes seen and the runtimes the program is configured to rotate, so a program running one of its three is a 66.7-point gap where the org-wide reading calls the same cycles a perfect split. Both fields are null unscoped, because there is then no single configuration for "even" to mean anything against, and an `automation_id` that is not a program's is an error rather than quietly the whole org.
+- `F19.provenance`: `GET /v1/improve/provenance` answers how many merged changes can be followed back to what produced them over a window of `days`, against the `target_coverage: 0.95` the plan asks for, carried with the answer so a reader does not have to know it. Three buckets rather than one ratio: `from_commit` is the strong answer, where a reader holding a line of `git log` starts; `from_pull_request` is the squash merge, whose commit was rewritten and whose trail leads back by a longer route, counted apart so it cannot pass as the stronger answer; and `unresolved` arrives with a `missing` map naming which part is gone (`prompt_digest`, `sources` or `merge_commit_sha`), because a bare total says the trail is broken and this says where. Only merged cycles count, so a cycle with no `merged_at` is not in the denominator at all, and with nothing merged `coverage` and `within_target` are both null rather than `1.0` and `true` — no merged work is not perfect provenance.
+- `F19.provenance-scoped`: `automation_id` scopes that answer to one program and echoes the id back, null unscoped. Nothing else about the measure moves with it — the same window, the same target — but the rows it counts are enough to put a program and its org on opposite sides of the verdict over the same cycles, so a program whose trail is complete is invisible inside the org's average. An `automation_id` that is not a program's is an error rather than quietly the whole org.
 - `F19.parked-list`: `GET /v1/improve/parked` answers everything waiting for a person across every program in the org, because the question is "what is waiting on me" and an answer that needs the reader to know which program to look in is not an answer.
 - `F19.resolve`: `POST .../resolve` records a person's answer with a required reason and returns the cycle to the phase it stopped at; `archive` ends it as COMPLETED with a REJECTED verdict, because a decision is not a malfunction. It needs `manage_automations` — the point of escalating is that the thing being gated is not the thing that answers.
 - `F19.resolve-not-escalate`: `escalate` is refused as an answer: that endpoint *is* the escalation, so escalating again would park the cycle on the person who just unparked it.
@@ -603,6 +606,74 @@ Preconditions:
   program routes (404, and 422 for an id that is not a UUID) instead of
   quietly widening back to the org.
 
+- **Following a merged change back (`F19.provenance`).** Nothing merged, then
+  the strong answer, the squash merge behind it, the three ways the trail
+  breaks, and the change that never landed.
+  Requires: `F19.create`
+  ```sh
+  control-automation api GET /v1/improve/provenance --expect 200 --check window_days eq 30 --check merged eq 0 --check from_commit eq 0 --check from_pull_request eq 0 --check unresolved eq 0 --check missing len-eq 0 --check coverage eq null --check target_coverage eq 0.95 --check within_target eq null --save F19.provenance/nothing-merged
+  PVM=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  PV1=$(control-automation api POST "/v1/improve/$AID/claim" --json '{}' --expect 201 --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$PV1" --json "{\"status\":\"COMPLETED\",\"verdict\":\"ACCEPTED\",\"merged_at\":\"$PVM\",\"merge_commit_sha\":\"d00df00dd00df00dd00df00dd00df00dd00df00d\",\"pr_url\":\"https://qa.invalid/alpha/pull/1\",\"prompt_digest\":\"sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"sources\":[{\"url\":\"https://qa.invalid/docs/indexes\",\"title\":\"Index guide\"}]}" --expect 200 --check merged_at eq "$PVM" --check merge_commit_sha eq d00df00dd00df00dd00df00dd00df00dd00df00d --check prompt_digest matches '^sha256:' --save F19.provenance/merged
+  control-automation api GET /v1/improve/provenance --expect 200 --check merged eq 1 --check from_commit eq 1 --check unresolved eq 0 --check coverage eq 1.0 --check within_target eq true --save F19.provenance/from-commit
+  PV2=$(control-automation api POST "/v1/improve/$AID/claim" --json '{}' --expect 201 --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$PV2" --json "{\"status\":\"COMPLETED\",\"verdict\":\"ACCEPTED\",\"merged_at\":\"$PVM\",\"pr_url\":\"https://qa.invalid/alpha/pull/2\",\"prompt_digest\":\"sha256:2222222222222222222222222222222222222222222222222222222222222222\",\"sources\":[{\"url\":\"https://qa.invalid/docs/squash\",\"title\":\"Squash merges\"}]}" --expect 200 --check merge_commit_sha eq null --check pr_url eq https://qa.invalid/alpha/pull/2
+  control-automation api GET /v1/improve/provenance --expect 200 --check merged eq 2 --check from_commit eq 1 --check from_pull_request eq 1 --check unresolved eq 0 --check missing len-eq 0 --check coverage eq 1.0 --check within_target eq true --save F19.provenance/from-pull-request
+  PV3=$(control-automation api POST "/v1/improve/$AID/claim" --json '{}' --expect 201 --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$PV3" --json "{\"status\":\"COMPLETED\",\"merged_at\":\"$PVM\",\"merge_commit_sha\":\"aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111\",\"prompt_digest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\"}" --expect 200 --check sources len-eq 0
+  PV4=$(control-automation api POST "/v1/improve/$AID/claim" --json '{}' --expect 201 --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$PV4" --json "{\"status\":\"COMPLETED\",\"merged_at\":\"$PVM\",\"merge_commit_sha\":\"bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222\",\"sources\":[{\"url\":\"https://qa.invalid/docs/trail\",\"title\":\"Audit trail\"}]}" --expect 200 --check prompt_digest eq null
+  PV5=$(control-automation api POST "/v1/improve/$AID/claim" --json '{}' --expect 201 --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$PV5" --json "{\"status\":\"COMPLETED\",\"merged_at\":\"$PVM\",\"prompt_digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"sources\":[{\"url\":\"https://qa.invalid/docs/trail\",\"title\":\"Audit trail\"}]}" --expect 200 --check merge_commit_sha eq null --check pr_url eq null
+  control-automation api GET /v1/improve/provenance --expect 200 --check merged eq 5 --check from_commit eq 1 --check from_pull_request eq 1 --check unresolved eq 3 --check missing.sources eq 1 --check missing.prompt_digest eq 1 --check missing.merge_commit_sha eq 1 --check coverage eq 0.4 --check within_target eq false --save F19.provenance/unresolved
+  PV6=$(control-automation api POST "/v1/improve/$AID/claim" --json '{}' --expect 201 --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$PV6" --json "{\"status\":\"REVIEWING\",\"verdict\":\"ACCEPTED\",\"head_sha\":\"deadbee\",\"prompt_digest\":\"sha256:6666666666666666666666666666666666666666666666666666666666666666\",\"sources\":[{\"url\":\"https://qa.invalid/docs/unmerged\",\"title\":\"Never landed\"}]}" --expect 200 --check merged_at eq null
+  control-automation api GET "/v1/improve/$AID/cycles" --query limit=1 --expect 200 --check cycles.0.id eq "$PV6" --check cycles.0.merged_at eq null --check cycles.0.prompt_digest matches '^sha256:' --check cycles.0.sources len-eq 1 --save F19.provenance/never-merged
+  control-automation state sql "SELECT count(*) AS n FROM automation_improve_cycle WHERE merged_at IS NOT NULL" --check rows.0.n eq 5
+  control-automation api GET /v1/improve/provenance --expect 200 --check merged eq 5 --check from_commit eq 1 --check unresolved eq 3 --check coverage eq 0.4
+  control-automation api GET /v1/improve/provenance --query days=abc --expect 422 --check detail.0.type eq int_parsing
+  ```
+  Nothing merged is `coverage: null` and `within_target: null`, not a perfect
+  score: the first reading carries the target and withholds the verdict,
+  because there is no merged work that could have been traceable. The squash
+  merge is the reading to look at twice — `coverage: 1.0` with `from_commit`
+  still 1 of 2 — so the fallback the plan asks to be reported rather than
+  hidden counts as resolved without counting as the stronger answer, which a
+  reader holding only the ratio could not tell apart. The three unresolved
+  cycles are one bucket and three different gaps: a merged change that cited
+  nothing, one with no prompt behind it, and one carrying both and recorded
+  with neither a commit nor a pull request, which is merged and leading
+  nowhere. `missing` names each, so the number says where to go rather than
+  only that something is wrong. The last cycle has a prompt digest, a cited
+  source and a verdict and never merged, and the answer does not move: five
+  merged rows in the org and a denominator of five, because a change nobody
+  has to audit would only flatter the measure.
+
+- **One program's trail, not the org's average (`F19.provenance-scoped`).**
+  The same merged cycles, asked about a program with a complete trail, about
+  the org, and about the program that broke it.
+  Requires: `F19.provenance`
+  ```sh
+  PSID=$(control-automation api POST /v1/preset/improve --json "{\"name\":\"qa improve traceable\",\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"},\"improve\":{\"builder_profile_id\":\"$BUILDER\",\"repository_source\":\"explicit\",\"repositories\":[{\"label\":\"qa epsilon\",\"url\":\"https://qa.invalid/epsilon.git\"}]}}" --expect 201 --field id)
+  PSC=$(control-automation api POST "/v1/improve/$PSID/claim" --json '{}' --expect 201 --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$PSC" --json "{\"status\":\"COMPLETED\",\"verdict\":\"ACCEPTED\",\"merged_at\":\"$PVM\",\"merge_commit_sha\":\"cccc3333cccc3333cccc3333cccc3333cccc3333\",\"prompt_digest\":\"sha256:7777777777777777777777777777777777777777777777777777777777777777\",\"sources\":[{\"url\":\"https://qa.invalid/docs/epsilon\",\"title\":\"Epsilon notes\"}]}" --expect 200 --check merged_at eq "$PVM"
+  control-automation api GET /v1/improve/provenance --query "automation_id=$PSID" --expect 200 --check automation_id eq "$PSID" --check window_days eq 30 --check merged eq 1 --check from_commit eq 1 --check unresolved eq 0 --check missing len-eq 0 --check coverage eq 1.0 --check target_coverage eq 0.95 --check within_target eq true --save F19.provenance-scoped/one-program
+  control-automation api GET /v1/improve/provenance --expect 200 --check automation_id eq null --check merged eq 6 --check from_commit eq 2 --check from_pull_request eq 1 --check unresolved eq 3 --check coverage eq 0.5 --check within_target eq false --save F19.provenance-scoped/org-wide
+  control-automation api GET /v1/improve/provenance --query "automation_id=$AID" --expect 200 --check automation_id eq "$AID" --check merged eq 5 --check from_commit eq 1 --check unresolved eq 3 --check coverage eq 0.4 --check within_target eq false --save F19.provenance-scoped/the-broken-one
+  control-automation api GET /v1/improve/provenance --query automation_id=00000000-0000-0000-0000-000000000f19 --expect 404 --check detail eq 'Automation not found'
+  control-automation api GET /v1/improve/provenance --query automation_id=qa-not-a-uuid --expect 422 --check detail.0.type eq uuid_parsing
+  ```
+  Six merged cycles, read three ways: the new program is `coverage: 1.0` and
+  `within_target: true`, the org holding both programs is `0.5` and `false`,
+  and the program that produced the five is `0.4`. The same rows therefore
+  answer "can this be audited" with a pass and a failure at once, which is
+  what the parameter is for — an org-wide average cannot say which program's
+  trail is broken, and it is the only reading a dashboard gets unless it asks.
+  `window_days` and `target_coverage` do not move with the scope; only the
+  rows counted do. As on `/builder-share`, scoping asks about a program, so an
+  id that is not one is answered like the program routes instead of quietly
+  widening back to the org.
+
 - **Park a change and answer it (`F19.parked-list`, `F19.resolve`, `F19.resolve-not-escalate`, `F19.resolve-not-parked`, `F19.gate-log`).**
   Requires: `F19.create`
   ```sh
@@ -697,3 +768,10 @@ Preconditions:
   one run; ask for `days=1` to see `within_target` resolve. `days` is clamped
   into 1..365 rather than refused, so `days=0` answers about today and
   `days=400` about a year.
+- `GET /v1/improve/provenance` counts `from_pull_request` inside `coverage`,
+  so `coverage: 1.0` does not mean every merged change resolves from its
+  commit — it can be entirely squash merges, which is the weaker route the
+  plan asks to stay visible. Read `from_commit` beside the ratio, as the
+  provenance bullet's squash-merge reading does. The window here defaults to 30
+  days, not the 7 of `/builder-share`, and unscoped it spans every program in
+  the org, this harness's own cycles included.
