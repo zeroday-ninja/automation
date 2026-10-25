@@ -1,6 +1,7 @@
 """Request and response schemas for the improvement-program API."""
 
 import uuid
+from datetime import date
 from typing import Any
 
 from pydantic import (
@@ -451,6 +452,14 @@ class BuilderShareResponse(BaseModel):
     #: Null, not False, while the window is not covered: an unmet measure and
     #: an unmeasurable one are different answers.
     within_target: bool | None = None
+    #: The earliest date this can be answered, when it cannot be answered yet.
+    #:
+    #: `within_target: null` says "not yet" and left the reader to work out
+    #: *when* from `days_covered` and the window -- and the arithmetic is not
+    #: obvious, because a day with no cycles does not count toward coverage.
+    #: The capped claim already names when it resumes; a measure that is not
+    #: answerable yet owes the same courtesy. Null once it is answerable.
+    answerable_on: date | None = None
     #: Cycles whose `builder_runtime` names no runtime at all -- the literal
     #: "custom" a profile with its own launch command records, or the "acp"
     #: fallback when the lookup failed. Kept out of the share rather than
