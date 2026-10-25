@@ -435,6 +435,18 @@ class BuilderShareResponse(BaseModel):
     #: Null, not False, while the window is not covered: an unmet measure and
     #: an unmeasurable one are different answers.
     within_target: bool | None = None
+    #: Cycles whose recorded builder is not the runtime that finished the
+    #: work. The plan asks for this to be zero and says "which today it does
+    #: not" -- so it is counted, not assumed.
+    misattributed_cycles: int = 0
+    #: Handoffs written, never resumed, and then overtaken by a fresh cycle
+    #: on the same repository. The plan asks for zero of these too: the next
+    #: cycle redid from nothing what the last one had already paid to learn.
+    work_redone: int = 0
+    #: Handoffs still waiting. Not a fault -- nobody has had the chance yet --
+    #: but reported, because a number that only counts failures cannot show
+    #: work quietly piling up.
+    handoffs_waiting: int = 0
 
 
 class ProvenanceResponse(BaseModel):

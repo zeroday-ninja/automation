@@ -512,3 +512,99 @@ async def provenance_of_merged_cycles(
         ),
         since,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class RotationFaults:
+    """The two halves of the rotation's measure that are not a share.
+
+    Milestone 4 asks for three things and only one of them is a percentage:
+    "builder share ... within twenty percent of even; **zero cycles that redo
+    work a prior incomplete handoff already covered**; **the recorded builder
+    runtime matches the runtime that actually ran**, which today it does not".
+    Both of the others are counts of a specific wrong thing, and both were
+    fixed without anything being able to say they stayed fixed.
+    """
+
+    #: Cycles whose recorded builder is not the runtime that finished the
+    #: work. The switch trail says where the turn ended; disagreeing with it
+    #: means the share, the reviewer choice and the ledger are all filed
+    #: under a runtime that did not do it.
+    misattributed: int
+    #: Handoffs that were written, never resumed, and then overtaken by a
+    #: fresh cycle on the same repository. The next cycle redid from nothing
+    #: what the last one had already paid to learn.
+    redone: int
+    #: Handoffs still waiting. Not a fault -- nobody has had the chance yet --
+    #: but reported, because a number that only ever counts failures cannot
+    #: show work quietly piling up.
+    waiting: int
+
+
+async def rotation_faults(
+    session: AsyncSession,
+    org_id: uuid.UUID,
+    *,
+    days: int,
+    automation_id: uuid.UUID | None = None,
+    now: datetime | None = None,
+) -> RotationFaults:
+    """Count the two things milestone 4 asks for that are not a share."""
+    moment = now or datetime.now(UTC)
+    since = moment - timedelta(days=days)
+    scope = [
+        AutomationImproveCycle.org_id == org_id,
+        AutomationImproveCycle.created_at >= since,
+    ]
+    if automation_id is not None:
+        scope.append(AutomationImproveCycle.automation_id == automation_id)
+
+    rows = (
+        await session.execute(
+            select(
+                AutomationImproveCycle.builder_runtime,
+                AutomationImproveCycle.runtime_switches,
+                AutomationImproveCycle.handoff,
+                AutomationImproveCycle.resumed_by_cycle_id,
+                AutomationImproveCycle.repo_url,
+                AutomationImproveCycle.created_at,
+            ).where(*scope)
+        )
+    ).all()
+
+    misattributed = 0
+    unresumed: list[tuple[str, datetime]] = []
+    newest_on_repo: dict[str, datetime] = {}
+    for runtime, switches, handoff, resumed_by, repo_url, created_at in rows:
+        stamp = created_at if created_at.tzinfo else created_at.replace(tzinfo=UTC)
+        if repo_url:
+            previous = newest_on_repo.get(repo_url)
+            if previous is None or stamp > previous:
+                newest_on_repo[repo_url] = stamp
+        # The trail is the authority: `builder_runtime` is reported twice, at
+        # claim time from the profile and again with whatever ran, and the
+        # second is the only one an audit can use.
+        if isinstance(switches, list) and switches:
+            last = switches[-1]
+            landed = last.get("to") if isinstance(last, dict) else None
+            if landed and runtime and landed != runtime:
+                misattributed += 1
+        if (
+            isinstance(handoff, dict)
+            and handoff.get("status") == "incomplete"
+            and handoff.get("next_steps")
+            and resumed_by is None
+            and repo_url
+        ):
+            unresumed.append((repo_url, stamp))
+
+    redone = sum(
+        1
+        for repo_url, stamp in unresumed
+        if newest_on_repo.get(repo_url, stamp) > stamp
+    )
+    return RotationFaults(
+        misattributed=misattributed,
+        redone=redone,
+        waiting=len(unresumed) - redone,
+    )
