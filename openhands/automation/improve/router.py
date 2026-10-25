@@ -519,6 +519,15 @@ async def update_cycle(
                 # bug looks like a client that never decided anything.
                 recorded.append({"unreadable": True, "problem": problem, "raw": entry})
                 continue
+            if accepted in recorded:
+                # The same decision, to the timestamp: a re-send, not a second
+                # decision. Two decisions genuinely taken differ in at least
+                # their instant, and a client that re-sends the log it read
+                # would otherwise double every entry in it — which is what
+                # happened the first time a resolved park was resumed. The log
+                # is the answer to "why did this go that way"; a doubled one
+                # reads as somebody deciding twice.
+                continue
             recorded.append(accepted)
         cycle.gate_decisions = recorded[-MAX_GATE_DECISIONS:]
     for field in ("parked_question", "parked_phase", "parked_plan"):
