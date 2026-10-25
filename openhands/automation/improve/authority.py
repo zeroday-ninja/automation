@@ -265,7 +265,29 @@ def _deletion_authority(
             reason=f"The judge would not attest a removal: {detail}",
         )
     judge_runtime = attestation.get("runtime")
-    if judge_runtime and builder_runtime and judge_runtime == builder_runtime:
+    # Both sides have to be known for the comparison to mean anything, and
+    # "cannot tell" is not "is not". Either being absent used to pass the
+    # check, and the reason given then claimed the signer "did not build this
+    # change" -- which the service had no way to know. A null builder runtime
+    # needs nobody to misbehave: the progress report that records it is
+    # deliberately non-fatal, so a dropped PATCH leaves it empty on a cycle
+    # that ran fine.
+    if not builder_runtime or not judge_runtime:
+        unknown = "builder_runtime" if not builder_runtime else "judge_attestation"
+        return Authority(
+            authorised=False,
+            route="return",
+            reason=(
+                "The signer is never the author, and this cannot be shown: "
+                + (
+                    "the runtime that built the change was never recorded."
+                    if not builder_runtime
+                    else "the attestation does not say which runtime judged it."
+                )
+            ),
+            missing=(unknown,),
+        )
+    if judge_runtime == builder_runtime:
         # The service checks this rather than trusting the configuration,
         # because a rotation moves the builder between cycles and a model
         # favours its own output.
@@ -283,7 +305,7 @@ def _deletion_authority(
         authorised=True,
         route="approve",
         reason=(
-            f"Every removal was attested by {judge_runtime or 'the judge'}, "
-            "which did not build this change."
+            f"Every removal was attested by {judge_runtime}, which did not "
+            f"build this change ({builder_runtime} did)."
         ),
     )
