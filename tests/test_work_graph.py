@@ -364,6 +364,51 @@ async def test_parked_work_is_waiting_rather_than_in_flight_or_failed(
 
 
 @pytest.mark.asyncio
+async def test_a_handoff_whose_code_is_gone_says_so_and_says_why(
+    async_client, async_session
+):
+    """`branch_pushed: false` means the code is gone. Why is the other half.
+
+    The graph drew the cycle and the branch it names, and a reader following
+    that branch found nothing there. The reason the save failed was printed
+    to the run's log — and run logs are pruned, so fifteen unsaved handoffs
+    on this machine could no longer be asked why. A degraded path writes its
+    reason onto the record.
+    """
+    # Arrange
+    automation = await _program(async_session)
+    run = await _run(async_session, automation, status=AutomationRunStatus.COMPLETED)
+    cycle = await _cycle(
+        async_session,
+        automation,
+        run,
+        status=ImproveCycleStatus.FAILED,
+        verdict=None,
+        handoff={
+            "schema_version": 1,
+            "status": "incomplete",
+            "reason": "timed_out",
+            "branch": "improve/20261025-0140",
+            "branch_pushed": False,
+            "next_steps": ["Continue from the plan."],
+            "save_note": (
+                "improve/20261025-0140 exists but the builder left HEAD "
+                "elsewhere; its work was not moved onto it"
+            ),
+        },
+    )
+    await async_session.commit()
+
+    # Act
+    body = (await async_client.get(GRAPH)).json()
+
+    # Assert
+    unsaved = [o for o in body["omissions"] if o["kind"] == "handoff_unsaved"]
+    assert [o["key"] for o in unsaved] == [f"cycle:{cycle.id}"]
+    assert "left HEAD elsewhere" in unsaved[0]["detail"]
+
+
+@pytest.mark.asyncio
 async def test_a_parked_cycle_is_not_reaped_however_long_it_waits(
     async_session, async_session_factory
 ):

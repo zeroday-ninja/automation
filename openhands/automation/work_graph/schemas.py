@@ -88,6 +88,11 @@ class OmissionKind(StrEnum):
     RUN_PRUNED = "run_pruned"
     CYCLE_REAPED = "cycle_reaped"
     WINDOW_TRUNCATED = "window_truncated"
+    #: A cycle handed over, and the code it was handing over never reached
+    #: the remote. The graph shows the cycle and the branch it names; this
+    #: says the branch is not there, which is the difference between work a
+    #: reader can continue and work that is gone.
+    HANDOFF_UNSAVED = "handoff_unsaved"
 
 
 class WorkNode(BaseModel):

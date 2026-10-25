@@ -48,6 +48,14 @@ class Handoff:
     next_steps: list[str]
     do_not: list[str]
     files_touched: list[str]
+    #: Why this cycle's work did not reach the branch, when it did not.
+    #:
+    #: `branch_pushed: false` says the code is gone; this says what stopped
+    #: it. Without it the only account was a line in the run's log, and run
+    #: logs are pruned -- fifteen unsaved handoffs on this machine and not one
+    #: of them could still be asked why. A degraded path has to write its
+    #: reason onto the record, not print it.
+    save_note: str | None
     written_by: str | None
     written_at: str
 
@@ -65,6 +73,7 @@ class Handoff:
             "next_steps": self.next_steps,
             "do_not": self.do_not,
             "files_touched": self.files_touched,
+            "save_note": self.save_note,
             "long_form_path": HANDOFF_PROSE_PATH,
             "written_by": self.written_by,
             "written_at": self.written_at,
@@ -109,6 +118,11 @@ def parse_handoff(raw: Any, *, written_by: str | None = None) -> Handoff | None:
         next_steps=next_steps,
         do_not=_strings(raw.get("do_not"), 20, 300),
         files_touched=_strings(raw.get("files_touched"), 50, 300),
+        save_note=(
+            str(raw["save_note"])[:500]
+            if isinstance(raw.get("save_note"), str) and raw["save_note"].strip()
+            else None
+        ),
         written_by=written_by,
         written_at=datetime.now(UTC).isoformat(),
     )
@@ -121,6 +135,7 @@ def degraded_handoff(
     branch_pushed: bool,
     summary: str | None,
     reason: str,
+    save_note: str | None = None,
     written_by: str | None = None,
 ) -> Handoff:
     """A handoff written by this script, with no model involved.
@@ -145,6 +160,7 @@ def degraded_handoff(
         ],
         do_not=[],
         files_touched=[],
+        save_note=save_note,
         written_by=written_by,
         written_at=datetime.now(UTC).isoformat(),
     )
@@ -176,6 +192,7 @@ def downgrade_unpushed(handoff: Handoff) -> Handoff:
         ],
         do_not=handoff.do_not,
         files_touched=handoff.files_touched,
+        save_note=handoff.save_note,
         written_by=handoff.written_by,
         written_at=handoff.written_at,
     )

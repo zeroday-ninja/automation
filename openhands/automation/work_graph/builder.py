@@ -269,6 +269,24 @@ def build_graph(
                 cycle_key,
             )
 
+        handoff = cycle.handoff if isinstance(cycle.handoff, dict) else None
+        if (
+            handoff
+            and handoff.get("status") == "incomplete"
+            and handoff.get("next_steps")
+            and not handoff.get("branch_pushed")
+        ):
+            # Said out loud rather than left for a reader to notice that a
+            # branch they were pointed at does not exist. The reason comes
+            # from the cycle that tried to save it; "no reason recorded" is
+            # itself worth seeing, because it means an older cycle wrote this
+            # before anything recorded one.
+            graph.omit(
+                OmissionKind.HANDOFF_UNSAVED,
+                str(handoff.get("save_note") or "No reason was recorded.")[:500],
+                cycle_key,
+            )
+
         repo = repository_key(cycle.repo_url, cycle.repo_ref)
         graph.node(
             WorkNode(
