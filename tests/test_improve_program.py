@@ -352,6 +352,51 @@ class TestTheBuilderShare:
         await async_session.flush()
         return cycle
 
+    async def test_a_measure_that_cannot_answer_yet_says_when_it_can(
+        self, async_client, async_session
+    ):
+        """ "Not yet" owes the reader a date.
+
+        `within_target: null` is the honest answer while a week has not
+        happened — and it left the reader to work the date out from
+        `days_covered` and the window, which is not obvious arithmetic
+        because a day with no cycles does not count toward coverage. The
+        capped claim already names when it resumes.
+        """
+        # Arrange: one day of history against a seven-day question.
+        await add_remote(async_client, "https://github.com/acme/young", "young")
+        program = await create_program(async_client)
+        await self._cycle_built_by(async_session, program["id"], "codex", days_ago=0.5)
+        await async_session.commit()
+
+        # Act
+        response = await async_client.get(
+            "/api/automation/v1/improve/builder-share?days=7"
+        )
+
+        # Assert: not answerable, and the date is the six days still missing
+        # rather than a week from now.
+        body = response.json()
+        assert body["days_covered"] == 1
+        assert body["within_target"] is None
+        assert (
+            body["answerable_on"]
+            == (datetime.now(UTC) + timedelta(days=6)).date().isoformat()
+        )
+
+        # And once the window is covered the field is empty, because the
+        # answer is the answer.
+        for day in range(1, 7):
+            await self._cycle_built_by(
+                async_session, program["id"], "codex", days_ago=day + 0.5
+            )
+        await async_session.commit()
+        covered = await async_client.get(
+            "/api/automation/v1/improve/builder-share?days=7"
+        )
+        assert covered.json()["days_covered"] == 7
+        assert covered.json()["answerable_on"] is None
+
     async def test_one_runtime_doing_everything_is_never_an_even_split(
         self, async_client, async_session
     ):

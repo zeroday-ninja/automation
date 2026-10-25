@@ -11,7 +11,7 @@ Two kinds of caller share it:
 
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -905,8 +905,18 @@ async def get_builder_share(
     )
     gap = evenness_gap(shares, expected_runtimes=expected)
     within = None
+    answerable_on = None
     if covered >= window and gap is not None:
         within = gap <= 20.0
+    else:
+        # When, not just "not yet". A day with no cycles does not count toward
+        # coverage, so the arithmetic is not something a reader should have to
+        # do: the earliest this can be answered is the window's worth of days
+        # after the oldest one already counted. The capped claim names when it
+        # resumes for the same reason.
+        answerable_on = (
+            utcnow() + timedelta(days=max(0, window - covered))
+        ).date()
     return BuilderShareResponse(
         automation_id=automation_id,
         configured_builders=expected,
@@ -924,6 +934,7 @@ async def get_builder_share(
         ],
         evenness_gap=gap,
         within_target=within,
+        answerable_on=answerable_on,
         unattributed_cycles=unattributed,
         misattributed_cycles=faults.misattributed,
         work_redone=faults.redone,
