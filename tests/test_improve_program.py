@@ -2402,6 +2402,46 @@ class TestTheHandoffIsVisible:
         by_id = {c["id"]: c for c in history.json()["cycles"]}
         assert by_id[first]["resumed_by_cycle_id"] == second["id"]
 
+    async def test_a_handoff_is_found_however_the_other_program_was_set_up(
+        self, async_client
+    ):
+        """One repository, two configurations, one piece of saved work.
+
+        "Same repository" was the remote's id when the claimant had one and
+        the label otherwise — so a handoff written by a program that lists
+        its repositories by hand was invisible to a git-synced program, and
+        the next cycle restarted work that was already on a branch. Milestone
+        4 counts that: "zero cycles that redo work a prior incomplete handoff
+        already covered".
+        """
+        # Arrange: a hand-configured program hands over, and a git-synced
+        # program is next to take the same repository.
+        url = "https://github.com/acme/shared"
+        listed = await create_program(
+            async_client,
+            repository_source="explicit",
+            repositories=[{"label": "shared", "url": url, "ref": "main"}],
+        )
+        first = (await claim(async_client, listed["id"])).json()["cycle"]["id"]
+        await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{first}",
+            json={
+                "status": "FAILED",
+                "builder_runtime": "claude-code",
+                "handoff": self.FALLBACK,
+            },
+        )
+        await add_remote(async_client, url + ".git", "shared")
+        synced = await create_program(async_client)
+
+        # Act
+        claimed = await claim(async_client, synced["id"])
+
+        # Assert: it continues the work rather than starting again.
+        assert claimed.status_code == 201, claimed.text
+        assert claimed.json()["cycle"]["resumed_from_cycle_id"] == first
+        assert self.FALLBACK["next_steps"][0] in claimed.json()["resume"]["next_steps"]
+
     async def test_a_handoff_that_saved_its_work_is_offered_as_a_branch(
         self, async_client
     ):

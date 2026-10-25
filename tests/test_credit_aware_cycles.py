@@ -25,6 +25,7 @@ from openhands.automation.improve.usage import (
 )
 from openhands.automation.models import (
     Automation,
+    AutomationGitSyncRemote,
     AutomationImproveCycle,
     AutomationRun,
     AutomationRunStatus,
@@ -74,14 +75,21 @@ def test_a_zone_nobody_knows_falls_back_rather_than_failing_a_claim() -> None:
 def test_a_relabelled_repository_does_not_get_a_fresh_allowance() -> None:
     # Arrange
     remote = uuid.uuid4()
+    url = "https://github.com/zeroday-ninja/hazard"
 
-    # Act / Assert: identity follows the remote when there is one, because a
-    # rename would otherwise hand the same repository a second allowance —
-    # which the live history shows happening.
-    assert repository_identity(remote, "hazard") == repository_identity(
-        remote, "HAZARD"
+    # Act / Assert: a label is a display name and the live history shows one
+    # repository carrying two of them in a day, so identity must not follow it.
+    assert repository_identity(remote, "hazard", url) == repository_identity(
+        remote, "HAZARD", url
     )
-    assert repository_identity(None, "hazard") != repository_identity(None, "pairwatch")
+    # With no url to read, the remote's id is what is left — and it is still
+    # better than the label for the same reason.
+    assert repository_identity(remote, "hazard", None) == repository_identity(
+        remote, "HAZARD", None
+    )
+    assert repository_identity(None, "hazard", None) != repository_identity(
+        None, "pairwatch", None
+    )
 
 
 @pytest.mark.asyncio
@@ -124,12 +132,117 @@ async def test_cycles_are_counted_across_programs_not_per_program(
         ORG_ID,
         remote_id=None,
         label="hazard",
+        url="https://example.invalid/hazard",
         timezone_name="UTC",
     )
 
     # Assert: three programs each taking their own allowance of one repository
     # is the runaway the cap exists to prevent.
     assert taken == 3
+
+
+@pytest.mark.asyncio
+async def test_one_repository_is_one_allowance_however_it_was_configured(
+    async_session,
+) -> None:
+    """Two spellings of the same repository are not two repositories.
+
+    Identity was "the remote's id, or the label" — and those are disjoint
+    buckets, because the label branch only counts rows whose remote id is
+    null. A repository reached through a git-sync remote by one program and
+    listed by hand in another therefore had **two** allowances.
+
+    Observed live on 2026-10-25: `HAZARD` took 20 cycles against a cap of 10
+    — ten under `remote_id b97fd366…` from the rotating program and ten under
+    the label `HAZARD` from a program configured explicitly. Milestone 4's
+    exit says no repository exceeds its cap.
+    """
+    # Arrange: the same repository, reached both ways, five cycles each.
+    program = Automation(
+        id=uuid.uuid4(),
+        org_id=ORG_ID,
+        user_id=USER_ID,
+        name="Rotating",
+        trigger={"type": "cron", "schedule": "0 3 * * *", "timezone": "UTC"},
+        enabled=True,
+        tarball_path="uploads/test.tar.gz",
+        entrypoint="python main.py",
+    )
+    async_session.add(program)
+    synced = uuid.uuid4()
+    async_session.add(
+        AutomationGitSyncRemote(id=synced, org_id=ORG_ID, is_default=True)
+    )
+    await async_session.flush()
+    for index in range(10):
+        from_git_sync = index % 2 == 0
+        async_session.add(
+            AutomationImproveCycle(
+                id=uuid.uuid4(),
+                automation_id=program.id,
+                org_id=ORG_ID,
+                repo_index=0,
+                # The spellings the two configuration styles actually produce:
+                # git-sync stores the remote's url and uses its own id, an
+                # explicit entry carries a label and no id.
+                repo_label=(
+                    "https://github.com/zeroday-ninja/HAZARD"
+                    if from_git_sync
+                    else "HAZARD"
+                ),
+                repo_url=(
+                    "https://github.com/zeroday-ninja/HAZARD"
+                    if from_git_sync
+                    else "https://github.com/zeroday-ninja/HAZARD.git"
+                ),
+                remote_id=synced if from_git_sync else None,
+                status=ImproveCycleStatus.COMPLETED,
+            )
+        )
+    await async_session.commit()
+
+    # Act: asked as either program would ask.
+    as_synced = await cycles_today(
+        async_session,
+        ORG_ID,
+        remote_id=synced,
+        label="https://github.com/zeroday-ninja/HAZARD",
+        url="https://github.com/zeroday-ninja/HAZARD",
+        timezone_name="UTC",
+    )
+    as_listed = await cycles_today(
+        async_session,
+        ORG_ID,
+        remote_id=None,
+        label="HAZARD",
+        url="git@github.com:zeroday-ninja/HAZARD.git",
+        timezone_name="UTC",
+    )
+
+    # Assert: one repository, one day's allowance, whichever program asks.
+    assert as_synced == 10
+    assert as_listed == 10
+
+
+def test_the_same_repository_written_four_ways_is_one_repository() -> None:
+    # The spellings a configuration actually arrives in, including a url
+    # carrying a token — which git-sync stores and which must not split a
+    # repository's allowance in two.
+    same = {
+        repository_identity(None, "HAZARD", url)
+        for url in (
+            "https://github.com/zeroday-ninja/HAZARD",
+            "https://github.com/zeroday-ninja/HAZARD.git",
+            "http://github.com/zeroday-ninja/hazard/",
+            "git@github.com:zeroday-ninja/HAZARD.git",
+            "ssh://git@github.com:22/zeroday-ninja/HAZARD",
+            "https://x-access-token:ghs_secret@github.com/zeroday-ninja/HAZARD",
+        )
+    }
+
+    assert len(same) == 1
+    # And a different repository on the same host stays different.
+    assert repository_identity(None, "a", "https://github.com/o/pairwatch") not in same
 
 
 # --- the runtime ledger -----------------------------------------------------

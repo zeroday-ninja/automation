@@ -4,6 +4,7 @@ Its own module because both ``config.py`` and ``rotation.py`` need it and
 neither should import the other.
 """
 
+import re
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -26,3 +27,36 @@ def strip_credentials(url: str) -> str:
     if parts.port:
         netloc = f"{netloc}:{parts.port}"
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
+def normalise_repository_url(url: str | None) -> str | None:
+    """A repository url reduced to the repository it names.
+
+    The spellings arrive from different places and mean the same thing: a
+    git-sync remote stores what the user pasted, a hand-written entry whatever
+    they typed, and a credentialed url carries a token in its authority. None
+    of those differences is a different repository.
+
+    ``None`` when there is nothing to read, so a caller can fall back.
+    """
+    text = (url or "").strip()
+    if not text:
+        return None
+    text = re.sub(r"^[A-Za-z][A-Za-z0-9+.-]*://", "", text)
+    authority, slash, path = text.partition("/")
+    # `user@host`, or `token:secret@host`: credentials identify the caller,
+    # never the repository.
+    authority = authority.rpartition("@")[2]
+    if ":" in authority:
+        host, _, after = authority.partition(":")
+        # `host:owner/repo` is scp-style and the colon is the path separator;
+        # `host:22` is a port and says nothing about which repository it is.
+        authority = host if after.isdigit() else f"{host}/{after}"
+    text = authority + slash + path
+    text = text.rstrip("/")
+    if text.endswith(".git"):
+        text = text[: -len(".git")]
+    # Lowercased: the forges this talks to treat a host and an owner/name
+    # case-insensitively, and two cases of one name sharing an allowance is
+    # the right way round to be wrong.
+    return text.lower() or None

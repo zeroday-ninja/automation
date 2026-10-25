@@ -15,12 +15,14 @@ whatever was actually taken.
 from __future__ import annotations
 
 import uuid
+from collections import Counter
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from openhands.automation.improve.url import normalise_repository_url
 from openhands.automation.models import AutomationImproveCycle
 
 
@@ -51,16 +53,66 @@ def local_day_bounds(
     return start_local.astimezone(UTC), end_local.astimezone(UTC)
 
 
-def repository_identity(remote_id: uuid.UUID | None, label: str) -> tuple[str, str]:
+def repository_identity(
+    remote_id: uuid.UUID | None, label: str, url: str | None
+) -> tuple[str, str]:
     """What counts as "the same repository" for the cap.
 
-    The remote's id when there is one, because a repository can be relabelled
-    and a label-only count would let a rename hand it a fresh allowance. The
-    label is the fallback for a repository configured by hand.
+    The url, normalised, because it is the only thing every configuration of
+    the same repository agrees on. Identity used to be "the remote's id, or
+    the label" — and those are disjoint buckets, so a repository reached
+    through a git-sync remote by one program and listed by hand in another had
+    **two** allowances. Live on 2026-10-25 that was `HAZARD` taking twenty
+    cycles against a cap of ten.
+
+    The remote's id and the label remain the fallbacks, in that order, for a
+    row with no url to read — and ``url`` is a required argument rather than a
+    defaulted one, because a caller that forgot it would silently count a
+    different bucket, and a brake that silently reads zero is worse than the
+    double allowance it is here to fix. A repository renamed at the forge does get a
+    fresh allowance for one day; a redirect is indistinguishable from a move,
+    and the alternative traded a real double allowance for a hypothetical one.
     """
+    normalised = normalise_repository_url(url)
+    if normalised is not None:
+        return ("url", normalised)
     if remote_id is not None:
         return ("remote", str(remote_id))
     return ("label", label)
+
+
+async def cycles_today_by_repository(
+    session: AsyncSession,
+    org_id: uuid.UUID,
+    timezone_name: str | None,
+    now: datetime | None = None,
+) -> Counter[tuple[str, str]]:
+    """Today's cycles, counted per repository, across the whole org.
+
+    Across the organization rather than per program: three programs each
+    taking their own allowance of the same repository is the runaway this is
+    here to prevent.
+
+    Counted here rather than in SQL because identity needs the url
+    normalised, which no portable query expresses — and one day of one org's
+    cycles is bounded by the global ceiling, so reading them is cheaper than
+    the per-repository query it replaces.
+    """
+    start, end = local_day_bounds(timezone_name, now)
+    rows = await session.execute(
+        select(
+            AutomationImproveCycle.remote_id,
+            AutomationImproveCycle.repo_label,
+            AutomationImproveCycle.repo_url,
+        ).where(
+            AutomationImproveCycle.org_id == org_id,
+            AutomationImproveCycle.created_at >= start,
+            AutomationImproveCycle.created_at < end,
+        )
+    )
+    return Counter(
+        repository_identity(remote_id, label, url) for remote_id, label, url in rows
+    )
 
 
 async def cycles_today(
@@ -69,34 +121,13 @@ async def cycles_today(
     *,
     remote_id: uuid.UUID | None,
     label: str,
+    url: str | None,
     timezone_name: str | None,
     now: datetime | None = None,
 ) -> int:
-    """How many cycles this repository has taken today, across the org.
-
-    Across the organization rather than per program: three programs each
-    taking their own allowance of the same repository is the runaway this is
-    here to prevent.
-    """
-    start, end = local_day_bounds(timezone_name, now)
-    kind, value = repository_identity(remote_id, label)
-    query = (
-        select(func.count())
-        .select_from(AutomationImproveCycle)
-        .where(
-            AutomationImproveCycle.org_id == org_id,
-            AutomationImproveCycle.created_at >= start,
-            AutomationImproveCycle.created_at < end,
-        )
-    )
-    if kind == "remote":
-        query = query.where(AutomationImproveCycle.remote_id == uuid.UUID(value))
-    else:
-        query = query.where(
-            AutomationImproveCycle.remote_id.is_(None),
-            AutomationImproveCycle.repo_label == value,
-        )
-    return (await session.execute(query)).scalar_one()
+    """How many cycles this one repository has taken today."""
+    counts = await cycles_today_by_repository(session, org_id, timezone_name, now)
+    return counts[repository_identity(remote_id, label, url)]
 
 
 async def cycles_today_for_org(
