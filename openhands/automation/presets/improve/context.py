@@ -914,6 +914,29 @@ def trace_runtime(
             }
         )
 
+    # A degraded trace earns no `ok` -- and it used to earn nothing at all,
+    # which left the failure in the run log and nowhere a reader would find
+    # it. The rule is that "a best-effort probe that fails records a degraded
+    # observation; it does not return quietly", and this probe failing has a
+    # consequence downstream: `misattributed_cycles` reads the switch trail as
+    # the authority on which runtime finished the work, so a trail that could
+    # not be read can make a correct attribution look wrong, or hide one that
+    # is, with nothing saying the input was partial.
+    #
+    # `degraded` is an outcome the ledger does not act on, so it changes no
+    # state and still lands in `last_observation` -- which is what is wanted:
+    # say what was seen, infer nothing about the subscription.
+    if degraded is not None:
+        observations.append(
+            {
+                "runtime": ran or "unknown",
+                "outcome": "degraded",
+                "observed_at": observed_at,
+                "evidence": degraded,
+                "conversation_id": conversation_id,
+            }
+        )
+
     return {
         "route": route,
         "ran": ran,

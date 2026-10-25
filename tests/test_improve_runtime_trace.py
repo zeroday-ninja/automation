@@ -150,4 +150,13 @@ def test_events_that_could_not_be_read_are_degraded_not_silent() -> None:
     # "nothing switched", because that is a claim about what happened.
     assert trace["degraded"]
     assert trace["ran"] == "codex"
-    assert trace["observations"] == []
+
+    # And the failure is recorded rather than only logged. It earns no `ok` —
+    # that would clear a real exhaustion on the strength of the one thing
+    # nobody observed — but it does earn a `degraded` observation, because
+    # `misattributed_cycles` treats the switch trail as the authority on which
+    # runtime finished the work and has to be able to see that this trail
+    # could not be read.
+    assert [item["outcome"] for item in trace["observations"]] == ["degraded"]
+    assert trace["observations"][0]["evidence"] == trace["degraded"]
+    assert trace["observations"][0]["runtime"] == "codex"
