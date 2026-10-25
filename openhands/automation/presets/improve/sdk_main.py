@@ -907,16 +907,24 @@ def execute_cycle(workspace) -> None:
             print(f"  WARNING: {identity_note}")
 
         soul_section = identity_sections(identity_documents, identity_note)
-        spent = identity_cost(identity_documents)
-        if spent["trimmed"] or spent["omitted"]:
-            # Said out loud, because the person whose document was cut is not
-            # reading the prompt. The record carries it too; this is for
-            # whoever is watching the run.
-            print(
-                f"  WARNING: the identity budget was not enough — trimmed "
-                f"{spent['trimmed'] or 'nothing'}, omitted "
-                f"{spent['omitted'] or 'nothing'}"
-            )
+        # Both sets, because both are injected and both spend the prompt. The
+        # project half used to be printed here and recorded nowhere, so a
+        # reader could not tell whether a cycle had read the repository's own
+        # identity at all.
+        spent = identity_cost(identity_documents, project=project_documents)
+        for label, cost in (
+            ("the user's", spent),
+            ("this project's", spent.get("project") or {}),
+        ):
+            if cost.get("trimmed") or cost.get("omitted"):
+                # Said out loud, because the person whose document was cut is
+                # not reading the prompt. The record carries it too; this is
+                # for whoever is watching the run.
+                print(
+                    f"  WARNING: {label} identity budget was not enough — "
+                    f"trimmed {cost['trimmed'] or 'nothing'}, omitted "
+                    f"{cost['omitted'] or 'nothing'}"
+                )
         identity_section = project_identity_sections(project_documents, repo_label)
         focus = clamp(config.get("focus"), 4000)
         focus_section = (

@@ -573,3 +573,78 @@ def test_a_handoff_that_does_not_say_is_treated_as_unpushed(preset) -> None:
 
     # Assert
     assert "commits are gone" in section
+
+
+def test_the_projects_own_identity_is_counted_too(preset) -> None:
+    """Half of identity was injected on every cycle and measured on none.
+
+    `identity_cost` answered for the user's six documents against their 24000
+    budget. The *repository's* four were read, trimmed to their own slots, and
+    put in the same prompt — up to 22000 characters that no record accounted
+    for. So "a cycle on a repository with a full identity set demonstrably
+    uses it" had nothing to demonstrate it with, and "identity never exceeds
+    its share of the cycle's context budget" was measured against one half of
+    identity.
+    """
+    # Arrange: a user document and a full project set.
+    documents = {"soul": "a" * 1000}
+    project = {
+        relative: "p" * 400
+        for relative, _title, _budget in preset.PROJECT_IDENTITY_DOCUMENTS
+    }
+
+    # Act
+    cost = preset.identity_cost(documents, project=project)
+
+    # Assert: which of the repository's documents the cycle read, and what the
+    # two halves cost together — the number the metric actually asks for.
+    assert set(cost["project"]["documents"]) == set(project)
+    assert cost["project"]["used"] == 400 * len(project)
+    assert cost["total"]["used"] == cost["used"] + cost["project"]["used"]
+    assert cost["total"]["budget"] == (
+        preset.IDENTITY_BUDGET_CHARS + preset.PROJECT_IDENTITY_BUDGET_CHARS
+    )
+    # The user's own figures stay exactly where a reader already looks for
+    # them, because the record is read by things that predate this.
+    assert cost["documents"] == {"soul": 1000}
+
+
+def test_a_projects_identity_is_capped_in_total_not_only_per_document(
+    preset,
+) -> None:
+    """Four documents inside their own slots still add up.
+
+    Each was trimmed to its own budget and nothing capped the set, so a
+    repository with four long identity documents could take most of a cycle's
+    prompt away from the repository it was improving.
+    """
+    # Arrange: four documents of 8000 — each inside the largest per-document
+    # slot, 32000 together. A fixed size rather than one derived from the
+    # budget: a test that scales its own input with the constant it is
+    # checking cannot tell the cap from the absence of one.
+    project = {
+        relative: "p" * 8000
+        for relative, _title, _budget in preset.PROJECT_IDENTITY_DOCUMENTS
+    }
+
+    # Act
+    section = preset.project_identity_sections(project, "acme/alpha")
+    cost = preset.identity_cost({}, project=project)
+
+    # Assert: the first document fills the budget, the rest are named as
+    # omitted rather than silently absent — in the prompt as well as in the
+    # record, because the cycle has to know what it is not being told.
+    assert cost["project"]["used"] <= 16000 + len("\n\n[truncated]")
+    assert cost["project"]["omitted"]
+    assert "identity budget was already spent" in section
+
+
+def test_a_repository_with_no_identity_is_asked_for_a_first_draft(preset) -> None:
+    # The other half of the milestone's exit: a missing set is an instruction,
+    # not an empty section. Kept beside the budget tests because the budget is
+    # what could have turned a present set into an absent-looking one.
+    section = preset.project_identity_sections({}, "acme/alpha")
+
+    flat = " ".join(section.split())
+    assert "has no PROJECT_IDENTITY.md" in flat
+    assert "first draft" in flat
