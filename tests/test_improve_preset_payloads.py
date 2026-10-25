@@ -51,6 +51,29 @@ def _literal_keys(node: ast.AST) -> set[str] | None:
     return keys
 
 
+def _patch_payloads(tree: ast.Module) -> list[tuple[int, set[str]]]:
+    """Dict literals PATCHed straight through `cycle_request`.
+
+    `report_cycle` is a closure over one cycle's id, so code that reports
+    against a cycle it did not claim calls the request helper itself. Those
+    payloads reach the same schema and were not being read.
+    """
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or len(node.args) < 3:
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Name) and func.id == "cycle_request"):
+            continue
+        method = node.args[0]
+        if not (isinstance(method, ast.Constant) and method.value == "PATCH"):
+            continue
+        keys = _literal_keys(node.args[2])
+        if keys is not None:
+            found.append((node.lineno, keys))
+    return found
+
+
 @pytest.fixture(scope="module")
 def runner() -> ast.Module:
     return ast.parse(RUNNER_PATH.read_text(), filename=str(RUNNER_PATH))
@@ -98,9 +121,12 @@ class TestTheRunnerSendsOnlyFieldsTheServiceAccepts:
     def test_cycle_updates_match_the_update_schema(self, runner):
         accepted = set(UpdateCycleRequest.model_fields)
 
-        # Both forms the runner uses: a literal passed straight to the
-        # reporter, and one built as a named `*_update` first.
+        # Three forms the runner uses: a literal passed straight to the
+        # reporter, one built as a named `*_update` first, and one PATCHed
+        # through `cycle_request` directly — which the reporter's closure is
+        # not available for, outside the cycle it belongs to.
         payloads = _payloads(runner, call="report_cycle")
+        payloads.extend(_patch_payloads(runner))
         for node in ast.walk(runner):
             if not isinstance(node, ast.Assign) or len(node.targets) != 1:
                 continue

@@ -27,6 +27,7 @@ from openhands.automation.models import (
     ImproveCycleStatus,
     ImproveVerdict,
 )
+from openhands.automation.watchdog import reap_abandoned_cycles
 
 
 # The org `async_client` authenticates as (see conftest.py).
@@ -36,6 +37,7 @@ OTHER_ORG_ID = uuid.UUID("11111111-2222-4333-8444-555555555555")
 
 PRESET = "/api/automation/v1/preset/improve"
 REMOTES = "/api/automation/v1/git-sync/remotes"
+PARKED = "/api/automation/v1/improve/parked"
 BUILDER = "0a1b2c3d-0000-4000-8000-00000000b111"
 REVIEWER = "0a1b2c3d-0000-4000-8000-00000000c222"
 THIRD_BUILDER = "0a1b2c3d-0000-4000-8000-00000000d333"
@@ -1779,13 +1781,26 @@ class TestTheServiceKeepsTheRestrictiveReading:
 class TestParkingAndResolving:
     """A cycle that waits for a person, and the answer that restarts it."""
 
-    async def _parked(self, async_client, label: str) -> str:
+    #: What a cycle that reached the publish gate has already shown. A real
+    #: park happens *after* the build, the review and the readiness check, so
+    #: a fixture without this evidence is a cycle that could never have got
+    #: there — and a person approving it still cannot conjure a passing test.
+    PUBLISHABLE = {
+        "verdict": "ACCEPTED",
+        "head_sha": "a1b2c3d4e5f6",
+        "changed_files": ["server/socket.py"],
+        "checks": [{"command": "pytest tests/", "passed": True}],
+        "summary": "Renamed the event envelope and shipped both for a release.",
+    }
+
+    async def _parked(self, async_client, label: str, **evidence) -> str:
         await add_remote(async_client, f"https://github.com/acme/{label}", label)
         program = await create_program(async_client)
         cycle_id = (await claim(async_client, program["id"])).json()["cycle"]["id"]
         response = await async_client.patch(
             f"/api/automation/v1/improve/cycles/{cycle_id}",
             json={
+                **evidence,
                 "status": "PARKED",
                 "change_class": "breaking",
                 "branch": "improve/20261024",
@@ -1824,7 +1839,7 @@ class TestParkingAndResolving:
 
         # Assert: visible as waiting, across every program, with the plan the
         # question cannot be answered without.
-        listed = await async_client.get("/api/automation/v1/improve/parked")
+        listed = await async_client.get(PARKED)
         assert listed.status_code == 200, listed.text
         parked = listed.json()["cycles"]
         assert [c["id"] for c in parked] == [cycle_id]
@@ -1833,7 +1848,7 @@ class TestParkingAndResolving:
         assert parked[0]["parked_at"]
         assert [d["route"] for d in parked[0]["gate_decisions"]] == ["escalate"]
 
-    async def test_resolving_returns_the_cycle_to_the_phase_it_stopped_at(
+    async def test_resolving_records_the_answer_against_the_phase_it_stopped_at(
         self, async_client
     ):
         # Arrange
@@ -1848,15 +1863,229 @@ class TestParkingAndResolving:
             },
         )
 
-        # Assert: back in flight rather than discarded, with the answer kept
-        # and both decisions on the record.
+        # Assert: the answer kept, both decisions on the record, and the
+        # phase to carry on from named on the decision rather than guessed.
         assert response.status_code == 200, response.text
         body = response.json()
-        assert body["status"] == "REVIEWING"
         assert body["resolution"].startswith("The client release")
         assert body["resolved_at"]
         assert [d["route"] for d in body["gate_decisions"]] == ["escalate", "approve"]
         assert body["gate_decisions"][-1]["decided_by"].startswith("user:")
+        assert body["gate_decisions"][-1]["phase"] == "publish"
+        # Still waiting — on a run now rather than on a person. Reading as in
+        # flight is what let the janitor close it as abandoned.
+        assert body["status"] == "PARKED"
+
+    async def test_an_answer_is_not_something_the_janitor_may_discard(
+        self, async_client, async_session_factory
+    ):
+        """Raise, resolve, resume — and the resume had nothing behind it.
+
+        Resolving used to put the cycle back to the phase it stopped at so it
+        read as in flight again. Three mechanisms believed that and all three
+        were wrong: the janitor closed it as abandoned on its next pass,
+        because the run that parked it had ended long before; the work graph
+        counted it as work in flight, so clients polled for a cycle nobody
+        was working on; and nothing ever picked it up, because the claim only
+        opens a new cycle. The person's answer bought nothing at all.
+
+        It stays PARKED — answered, and waiting on a run rather than on a
+        person — which is the one status the janitor already leaves alone and
+        the graph already draws as waiting.
+        """
+        # Arrange
+        cycle_id = await self._parked(async_client, "zeta")
+
+        # Act
+        answered = await async_client.post(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/resolve",
+            json={
+                "route": "approve",
+                "resolution": "The client release is out; publish it.",
+            },
+        )
+        reaped = await reap_abandoned_cycles(async_session_factory)
+
+        # Assert: still there, still answered, still offered.
+        assert answered.status_code == 200, answered.text
+        assert reaped == 0
+        listed = await async_client.get(
+            f"/api/automation/v1/improve/{answered.json()['automation_id']}/cycles"
+        )
+        held = next(c for c in listed.json()["cycles"] if c["id"] == cycle_id)
+        assert held["reaped"] is False
+        assert held["resolution"].startswith("The client release")
+
+    async def test_an_answered_question_stops_waiting_on_the_person(self, async_client):
+        # "What is waiting on me" is the whole purpose of this list, and a
+        # question they have already answered is not. It stays PARKED so the
+        # janitor leaves it alone; that must not leak into this surface.
+        cycle_id = await self._parked(async_client, "kappa")
+        assert [c["id"] for c in (await async_client.get(PARKED)).json()["cycles"]] == [
+            cycle_id
+        ]
+
+        await async_client.post(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/resolve",
+            json={"route": "approve", "resolution": "Consumers have moved."},
+        )
+
+        assert (await async_client.get(PARKED)).json()["cycles"] == []
+
+    async def test_a_question_is_answered_once(self, async_client):
+        # It stays PARKED until a run carries the answer out, so "is it
+        # parked" stopped answering "is it waiting" — and a second answer
+        # would overwrite the first and add another decision to the log that
+        # records who decided what.
+        cycle_id = await self._parked(async_client, "mu")
+        first = await async_client.post(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/resolve",
+            json={"route": "approve", "resolution": "Consumers have moved."},
+        )
+
+        second = await async_client.post(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/resolve",
+            json={"route": "archive", "resolution": "Actually, no."},
+        )
+
+        assert first.status_code == 200, first.text
+        assert second.status_code == 409
+        assert "already answered" in second.text
+
+    async def test_an_answered_cycle_is_handed_to_the_next_run_to_finish(
+        self, async_client
+    ):
+        """The resume half of the rule, which is what makes parking worth it.
+
+        The work is on a branch and a person has said to publish it, so the
+        next run finishes *that* cycle. Claiming would open a new one against
+        the rotation and rebuild a change that already exists — which is the
+        "restarts" the exit clause rules out.
+        """
+        # Arrange
+        cycle_id = await self._parked(async_client, "eta")
+        resolved = await async_client.post(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/resolve",
+            json={"route": "approve", "resolution": "Ship it; consumers moved."},
+        )
+        program_id = resolved.json()["automation_id"]
+
+        # Act
+        handed = await async_client.post(
+            f"/api/automation/v1/improve/{program_id}/continue", json={}
+        )
+
+        # Assert: the same cycle, with what the person said and where they
+        # sent it, and the program's current configuration to publish under.
+        assert handed.status_code == 200, handed.text
+        body = handed.json()
+        assert body["cycle"]["id"] == cycle_id
+        assert body["route"] == "approve"
+        assert body["resolution"] == "Ship it; consumers moved."
+        assert body["config"]["builder_profile_id"] == BUILDER
+
+        # And exactly once: a second run gets nothing rather than publishing
+        # the same change twice.
+        again = await async_client.post(
+            f"/api/automation/v1/improve/{program_id}/continue", json={}
+        )
+        assert again.status_code == 200
+        assert again.json() is None
+
+    async def test_sending_it_round_again_reaches_the_next_cycle_as_work(
+        self, async_client
+    ):
+        """`cycle` and `return` mean "more work", which is a builder's cycle.
+
+        Their answer is written as a handoff, because that is the channel a
+        next cycle already continues from: it arrives as the next steps, with
+        the branch the work is already on, instead of being a sentence in a
+        column nothing reads.
+        """
+        # Arrange
+        cycle_id = await self._parked(async_client, "lambda", **self.PUBLISHABLE)
+        resolved = await async_client.post(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/resolve",
+            json={
+                "route": "return",
+                "resolution": "Keep both envelopes for one release first.",
+            },
+        )
+        program_id = resolved.json()["automation_id"]
+
+        # Act: the next run claims as usual -- this is not a publish.
+        assert (
+            await async_client.post(
+                f"/api/automation/v1/improve/{program_id}/continue", json={}
+            )
+        ).json() is None
+        claimed = await claim(async_client, program_id)
+
+        # Assert: their words are what the next cycle is told to do, and the
+        # chain reads in both directions.
+        assert claimed.status_code == 201, claimed.text
+        assert claimed.json()["cycle"]["resumed_from_cycle_id"] == cycle_id
+        resume = claimed.json()["resume"]
+        assert "both envelopes" in resume["next_steps"][0]
+        assert resume["branch"] == "improve/20261024"
+        assert resume["branch_pushed"] is True
+        # And it stops waiting: handed on is finished, and a cycle left
+        # PARKED is one the janitor never closes and the graph draws as
+        # waiting for somebody for good.
+        history = await async_client.get(
+            f"/api/automation/v1/improve/{program_id}/cycles"
+        )
+        handed = next(c for c in history.json()["cycles"] if c["id"] == cycle_id)
+        assert handed["status"] == "COMPLETED"
+        assert (await async_client.get(PARKED)).json()["cycles"] == []
+
+    async def test_nothing_waiting_is_said_plainly_rather_than_as_an_error(
+        self, async_client
+    ):
+        # The usual case, asked once per run. An error here would make every
+        # ordinary run log a failure.
+        await add_remote(async_client, "https://github.com/acme/theta", "theta")
+        program = await create_program(async_client)
+
+        response = await async_client.post(
+            f"/api/automation/v1/improve/{program['id']}/continue", json={}
+        )
+
+        assert response.status_code == 200
+        assert response.json() is None
+
+    async def test_a_person_who_said_publish_outranks_the_class_that_parked_it(
+        self, async_client
+    ):
+        """Otherwise resolving a park could only produce the same refusal.
+
+        "A breaking change is never published from here" is a rule about
+        agents — the whole point of escalating is that the thing being gated
+        is not the thing that answers. The authority endpoint read only the
+        class, so a person's answer could not change it and the work stayed
+        parked forever.
+        """
+        # Arrange
+        cycle_id = await self._parked(async_client, "iota", **self.PUBLISHABLE)
+        refused = await async_client.get(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/authority"
+        )
+
+        # Act
+        await async_client.post(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/resolve",
+            json={"route": "approve", "resolution": "Both envelopes shipped."},
+        )
+        allowed = await async_client.get(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/authority"
+        )
+
+        # Assert
+        assert refused.json()["authorised"] is False
+        assert refused.json()["human_only"] is True
+        assert allowed.json()["authorised"] is True
+        assert allowed.json()["route"] == "approve"
+        assert "person" in allowed.json()["reason"]
 
     async def test_archiving_ends_it_deliberately_rather_than_as_a_failure(
         self, async_client

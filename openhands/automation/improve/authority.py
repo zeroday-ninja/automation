@@ -158,14 +158,27 @@ def resolve_authority(
     summary: str | None,
     builder_runtime: str | None,
     judge_attestation: dict | None,
+    resolved_route: str | None = None,
 ) -> Authority:
     """Whether this change may publish now.
 
     Order matters. The breaking case is answered before readiness, because
     perfect evidence does not make it an agent's decision and telling somebody
     to go and collect it first would be a lie about what the answer will be.
+
+    ``resolved_route`` is the route a *person* recorded against a parked
+    cycle. "A breaking change is never published from here" is a rule about
+    agents — the point of escalating is that the thing being gated is not the
+    thing that answers — so once the person has answered `approve`, the class
+    is no longer what decides. Without it, resolving a park could only ever
+    produce the same refusal, and "raise, resolve, resume" had no resume.
+
+    The evidence checks below still apply. A person approved the change, not
+    the absence of a passing test.
     """
-    if change_class == "breaking":
+    approved_by_a_person = resolved_route == "approve"
+
+    if change_class == "breaking" and not approved_by_a_person:
         return Authority(
             authorised=False,
             route="escalate",
@@ -234,6 +247,19 @@ def resolve_authority(
                 "on an assertion."
             ),
             missing=gaps,
+        )
+
+    if approved_by_a_person:
+        # The signature requirement exists because a model favours its own
+        # output. A person's answer is not the author's, whatever the class,
+        # so it satisfies what the judge was standing in for.
+        return Authority(
+            authorised=True,
+            route="approve",
+            reason=(
+                "A person answered the question this was parked on and said "
+                "to publish it."
+            ),
         )
 
     if change_class == "deleting":
