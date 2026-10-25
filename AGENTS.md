@@ -347,8 +347,10 @@ history, and the history *is* the rotation cursor.
 response returns it, so editing a program through
 `PUT /v1/improve/{automation_id}/config` takes effect on its next cycle without
 regenerating its code. A cycle already running is unaffected: it works from the
-configuration it claimed with. The tarball carries only `main.py`, `report.py`,
-`setup.sh` and the two prompt templates.
+configuration it claimed with. The tarball carries only code and prompts — the
+runner (`main.py`, `report.py`, `context.py`), the rule modules the service
+shares with it (`change_class.py`, `lessons.py`, `routing.py`), the four prompt
+templates and `setup.sh` — and no configuration at all.
 
 #### Files
 
