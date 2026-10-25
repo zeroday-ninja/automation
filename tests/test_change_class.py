@@ -9,6 +9,7 @@ as additive, because that is the failure that merges without asking.
 import pytest
 
 from openhands.automation.improve.change_class import (
+    DEFAULT_DELETION_THRESHOLD,
     assess_diff,
     claim_mismatch,
     normalize_change_class,
@@ -103,6 +104,28 @@ BIG_DELETION = "".join(
         "+one line instead\n",
     ]
 )
+
+
+def deletion_of(count: int) -> str:
+    """A diff that removes exactly `count` lines from one file.
+
+    Built rather than written out so the boundary cases below name the number
+    they are about: an off-by-one here moves a change between `additive` and
+    `deleting`, which is the difference between publishing on its own account
+    and waiting for a judge on another runtime.
+    """
+    return "".join(
+        [
+            "diff --git a/docs/notes.md b/docs/notes.md\n",
+            "index 1111111..2222222 100644\n",
+            "--- a/docs/notes.md\n",
+            "+++ b/docs/notes.md\n",
+            f"@@ -1,{count + 1} +1,2 @@\n",
+            *[f"-stale line {n}\n" for n in range(count)],
+            "+one line instead\n",
+        ]
+    )
+
 
 MIGRATION_DROPS = """\
 diff --git a/migrations/versions/040.py b/migrations/versions/040.py
@@ -286,3 +309,23 @@ def test_a_shipped_rule_module_needs_nothing_but_the_standard_library(
     }
 
     assert imported <= {"re", "dataclasses", "__future__"}
+
+
+def test_the_deletion_threshold_is_a_line_not_a_suggestion() -> None:
+    """`> threshold`, and the plan says why: "deletions inside a changed file
+    *above* a threshold … are deleting".
+
+    The rule was tested with eighteen deletions against a threshold of ten,
+    which passes whether the comparison is `>` or `>=` — and the comparison is
+    what decides whether a change publishes on its own account or waits for a
+    judge on a second runtime. Both sides of the line, by name.
+    """
+    # Act
+    at_the_line = assess_diff(deletion_of(DEFAULT_DELETION_THRESHOLD))
+    over_it = assess_diff(deletion_of(DEFAULT_DELETION_THRESHOLD + 1))
+
+    # Assert
+    rules_at = {reason.rule for reason in at_the_line.reasons}
+    assert "deletions_above_threshold" not in rules_at
+    assert "deletions_above_threshold" in {reason.rule for reason in over_it.reasons}
+    assert over_it.change_class == "deleting"
