@@ -435,6 +435,13 @@ class BuilderShareResponse(BaseModel):
     #: Null, not False, while the window is not covered: an unmet measure and
     #: an unmeasurable one are different answers.
     within_target: bool | None = None
+    #: Cycles whose `builder_runtime` names no runtime at all -- the literal
+    #: "custom" a profile with its own launch command records, or the "acp"
+    #: fallback when the lookup failed. Kept out of the share rather than
+    #: counted as a runtime: several different real runtimes land under the
+    #: same word, and folding them in widens the denominator for "even" so the
+    #: measure moves with how a profile was configured.
+    unattributed_cycles: int = 0
     #: Cycles whose recorded builder is not the runtime that finished the
     #: work. The plan asks for this to be zero and says "which today it does
     #: not" -- so it is counted, not assumed.

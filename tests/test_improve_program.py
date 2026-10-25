@@ -346,6 +346,58 @@ class TestTheBuilderShare:
         await async_session.flush()
         return cycle
 
+    async def test_a_cycle_that_names_no_runtime_is_not_counted_as_one(
+        self, async_client, async_session
+    ):
+        """ "custom" is not a runtime; it is the absence of a named one.
+
+        The preset resolves a profile's runtime from its ACP server, so a
+        profile with its own launch command records the literal "custom" and
+        several different real runtimes land under the same word. Counted as
+        a runtime it reports "a runtime called custom did some of the work",
+        and — worse — widens the denominator for "even", so the measure moves
+        with how a profile was configured rather than with who built.
+        """
+        # Arrange: two real runtimes and one cycle that names neither.
+        program = await create_program(async_client)
+        await self._cycle(async_session, program["id"], builder_runtime="claude-code")
+        await self._cycle(async_session, program["id"], builder_runtime="codex")
+        await self._cycle(async_session, program["id"], builder_runtime="custom")
+        await async_session.commit()
+
+        # Act
+        response = await async_client.get(
+            "/api/automation/v1/improve/builder-share?days=7"
+        )
+
+        # Assert: two runtimes, evenly split, and the third cycle visible as
+        # a gap in the record rather than as a runtime.
+        body = response.json()
+        assert {r["runtime"] for r in body["runtimes"]} == {"claude-code", "codex"}
+        assert body["cycles"] == 2
+        assert body["unattributed_cycles"] == 1
+        assert body["evenness_gap"] == 0.0
+
+    async def test_the_acp_fallback_is_also_no_runtime(
+        self, async_client, async_session
+    ):
+        # The other sentinel: when the profile detail lookup fails the preset
+        # falls back to the profile's kind. "acp" says even less than
+        # "custom" does.
+        program = await create_program(async_client)
+        await self._cycle(async_session, program["id"], builder_runtime="acp")
+        await async_session.commit()
+
+        response = await async_client.get(
+            "/api/automation/v1/improve/builder-share?days=7"
+        )
+
+        body = response.json()
+        assert body["runtimes"] == []
+        assert body["unattributed_cycles"] == 1
+        # Nothing attributable was built, so there is no share to judge.
+        assert body["evenness_gap"] is None
+
     async def test_a_cycle_filed_under_the_wrong_runtime_is_counted(
         self, async_client, async_session
     ):

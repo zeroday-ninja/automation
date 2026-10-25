@@ -303,6 +303,22 @@ async def last_observation_of(
     }
 
 
+#: Values `builder_runtime` carries that name no runtime at all.
+#:
+#: The preset resolves a profile's runtime from its ACP server, so a profile
+#: with a custom launch command records the literal ``"custom"``, and one
+#: whose detail lookup failed falls back to its kind, ``"acp"``. Neither
+#: identifies anything: several different real runtimes land under the same
+#: word.
+#:
+#: They are kept out of the share rather than counted as runtimes. A
+#: share-*of-runtimes* that includes them reports "a runtime called custom did
+#: 3% of the work", and -- worse -- widens the denominator for "even", so the
+#: measure moves because of how a profile was configured rather than because
+#: of who did the building.
+UNIDENTIFIED_RUNTIMES: frozenset[str] = frozenset({"custom", "acp"})
+
+
 @dataclass(frozen=True, slots=True)
 class BuilderShare:
     """How the building was divided between runtimes over a window.
@@ -350,7 +366,7 @@ async def builder_share(
     days: int,
     automation_id: uuid.UUID | None = None,
     now: datetime | None = None,
-) -> tuple[list[BuilderShare], datetime, int]:
+) -> tuple[list[BuilderShare], datetime, int, int]:
     """Who built the cycles of the last ``days``, and what fraction each did.
 
     Counted from the cycles themselves rather than from the ledger, because
@@ -364,10 +380,12 @@ async def builder_share(
     -- which is the right answer to "what has this machine been running" and
     the wrong one to "is this program's rotation working".
 
-    Returns the shares, the start of the window, and how many days of history
-    actually exist inside it. The last of those matters: "even over a week"
-    read off two days of data is not the measurement, and a caller that cannot
-    tell the difference will report a number that means nothing.
+    Returns the shares, the start of the window, how many days of history
+    actually exist inside it, and how many cycles name no runtime at all.
+
+    The days matter: "even over a week" read off two days of data is not the
+    measurement, and a caller that cannot tell the difference reports a number
+    that means nothing.
     """
     moment = now or datetime.now(UTC)
     since = moment - timedelta(days=days)
@@ -390,9 +408,16 @@ async def builder_share(
     ).all()
 
     counts: dict[str, int] = {}
+    unattributed = 0
     earliest: datetime | None = None
     for runtime, created_at in rows:
-        counts[runtime] = counts.get(runtime, 0) + 1
+        if runtime in UNIDENTIFIED_RUNTIMES:
+            # Counted, never folded in: work whose runtime nobody can name is
+            # a gap in the record, and hiding it would be worse than a share
+            # that does not add to 100.
+            unattributed += 1
+        else:
+            counts[runtime] = counts.get(runtime, 0) + 1
         stamp = created_at if created_at.tzinfo else created_at.replace(tzinfo=UTC)
         if earliest is None or stamp < earliest:
             earliest = stamp
@@ -403,7 +428,7 @@ async def builder_share(
         for name, count in sorted(counts.items(), key=lambda item: -item[1])
     ]
     covered = 0 if earliest is None else max(1, (moment - earliest).days + 1)
-    return shares, since, min(covered, days)
+    return shares, since, min(covered, days), unattributed
 
 
 @dataclass(frozen=True, slots=True)
