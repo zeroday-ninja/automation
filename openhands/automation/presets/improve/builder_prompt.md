@@ -117,6 +117,9 @@ file.
   "change_class": "additive | deleting | breaking",
   "followups": ["something you deliberately did not do"],
   "risks": ["what a reviewer should attack first"],
+  "affects": ["who or what relies on the behaviour you changed"],
+  "changeover": ["a step that keeps both sides working during the transition"],
+  "rollback": "how to undo this after it has been adopted, or null",
   "soul_suggestions": [{"text": "a preference, as the user would want it stated", "why": "what in this cycle suggested it"}]
 }
 ```
@@ -145,5 +148,16 @@ Rules for the report:
   an interpretation. Leave it empty rather than padding it — each entry is
   something a human has to read and decide on. Never try to edit SOUL.md
   yourself; these are proposals the user accepts or discards.
+- `affects`, `changeover` and `rollback` are the changeover plan, and they are
+  **required when your change removes or renames anything, changes a wire
+  contract, bumps a dependency's major version, or drops data** — whatever you
+  put in `change_class`, because the class is computed from your diff and a
+  breaking one waits for a person. That person gets your three answers and
+  nothing else: what breaks is read from the diff, but who depends on it, the
+  order of steps that keeps both sides working while it changes over, and how
+  to undo it afterwards are only knowable by whoever made the change. Leave
+  them empty on a change that takes nothing away. Saying "revert the commit"
+  in `rollback` is not an answer once anyone has adopted it; say what has to
+  be put back.
 - Write the file even if the cycle failed. A missing report is the one outcome
   that cannot be reviewed.

@@ -16,6 +16,7 @@ it is the only place either side is checked against the other.
 """
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -116,3 +117,69 @@ class TestTheRunnerSendsOnlyFieldsTheServiceAccepts:
                 f"{RUNNER_PATH.name}:{lineno} sends cycle fields the service "
                 f"rejects: {sorted(keys - accepted)}"
             )
+
+
+PROMPT_PATH = RUNNER_PATH.parent / "builder_prompt.md"
+
+REPORT_PATH = RUNNER_PATH.parent / "report.py"
+
+
+def _prompt_report_fields() -> set[str]:
+    """The report keys the builder prompt actually asks for.
+
+    Read out of the fenced JSON block the prompt tells the builder to write
+    verbatim — "Nothing else goes in that file" — so a field the service reads
+    and the prompt never names is visible as the empty set difference it is.
+    """
+    text = PROMPT_PATH.read_text()
+    start = text.index("Write exactly this JSON")
+    block = text[start : text.index("Rules for the report")]
+    return set(re.findall(r'^\s+"([a-z_]+)":', block, re.MULTILINE))
+
+
+def _fields_read_from_the_report(function: str) -> set[str]:
+    """Every `report.get("x")` inside one function of `report.py`."""
+    tree = ast.parse(REPORT_PATH.read_text())
+    target = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == function
+    )
+    found = set()
+    for node in ast.walk(target):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "report"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+        ):
+            found.add(node.args[0].value)
+    return found
+
+
+def test_the_changeover_plan_asks_for_what_it_reads() -> None:
+    """A plan assembled from fields nobody is asked for is three fallbacks.
+
+    `changeover_plan` reads `affects`, `changeover` and `rollback`, and the
+    prompt's report contract named none of them — so every breaking change
+    that parked for a person carried "The builder did not say who depends on
+    this", "The builder proposed no changeover sequence" and "Not stated by
+    the builder", always. Three live cycles were parked that way.
+
+    Milestone 5 asks a parked breaking change to carry what breaks, who
+    consumes it, the sequence that keeps both sides working, and the rollback.
+    Only the first is read from the diff; the other three have to be asked.
+    """
+    # Act
+    read = _fields_read_from_the_report("changeover_plan")
+    asked = _prompt_report_fields()
+
+    # Assert
+    assert read, "changeover_plan reads nothing from the report at all"
+    assert read <= asked, (
+        "the changeover plan reads report fields the builder prompt never "
+        f"asks for: {sorted(read - asked)}"
+    )
