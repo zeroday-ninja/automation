@@ -1143,41 +1143,74 @@ IMPROVE_PRESET_DIR = PRESETS_DIR / "improve"
 
 _IMPROVE_PRESET_CACHE: dict[str, str] | None = None
 
+#: What the cache was read from: every preset file's path, size and mtime.
+#:
+#: The cache used to be filled once per process and never invalidated, which
+#: made two things untrue. `POST /refresh-code` says it "repackages the
+#: program's runner from the preset code *on disk*" and repackaged the cache
+#: instead, reporting success — so a preset fix reached a long-running service
+#: only if it happened to restart. And `improve_preset_code_digest` reads the
+#: same cache, so `preset_code_is_current` compared a stale digest with a
+#: stale digest and always answered "current": the stale-code notice could
+#: never fire for the case it exists for.
+#:
+#: Keyed on the files themselves rather than cleared by hand at the one call
+#: site that noticed. A cache of "the code on disk" that does not follow the
+#: disk is not a cache, it is a copy with a different name.
+_IMPROVE_PRESET_STAMP: tuple | None = None
+
+
+def _improve_preset_sources() -> dict[str, Path]:
+    """Every file the runner is packaged from, by its name in the tarball."""
+    service = Path(__file__).parent / "improve"
+    return {
+        "main.py": IMPROVE_PRESET_DIR / "sdk_main.py",
+        "report.py": IMPROVE_PRESET_DIR / "report.py",
+        "context.py": IMPROVE_PRESET_DIR / "context.py",
+        # Shipped from the service package rather than from the preset
+        # directory: the service re-reads a reported class against the same
+        # rules, so there must be exactly one copy of them. The modules are
+        # stdlib-only for this reason.
+        "lessons.py": service / "lessons.py",
+        "routing.py": service / "routing.py",
+        "change_class.py": service / "change_class.py",
+        "setup.sh": IMPROVE_PRESET_DIR / "setup.sh",
+        "builder_prompt.md": IMPROVE_PRESET_DIR / "builder_prompt.md",
+        "reviewer_prompt.md": IMPROVE_PRESET_DIR / "reviewer_prompt.md",
+        "handoff_prompt.md": IMPROVE_PRESET_DIR / "handoff_prompt.md",
+        "judge_prompt.md": IMPROVE_PRESET_DIR / "judge_prompt.md",
+    }
+
+
+def _improve_preset_stamp(sources: dict[str, Path]) -> tuple:
+    """Enough of each file's metadata to notice an edit.
+
+    Size and modification time rather than a content hash: this runs on every
+    program read to answer "is that program's code current", and reading
+    eleven files to decide whether to read eleven files is no cache at all. A
+    stat is what makes following the disk cheap.
+    """
+    return tuple(
+        (name, stat.st_size, stat.st_mtime_ns)
+        for name, stat in sorted((name, path.stat()) for name, path in sources.items())
+    )
+
 
 def _load_improve_preset_files() -> dict[str, str]:
-    """Load and cache improve preset files from disk.
+    """Load the improve preset files from disk, re-reading them when they change.
 
     The prompts are packaged as files rather than built in the request so that
     what an agent is actually told is reviewable in the repository, next to
     the code that renders it.
     """
-    global _IMPROVE_PRESET_CACHE
-    if _IMPROVE_PRESET_CACHE is None:
+    global _IMPROVE_PRESET_CACHE, _IMPROVE_PRESET_STAMP
+    sources = _improve_preset_sources()
+    stamp = _improve_preset_stamp(sources)
+    if _IMPROVE_PRESET_CACHE is None or stamp != _IMPROVE_PRESET_STAMP:
         _IMPROVE_PRESET_CACHE = {
-            "main.py": (IMPROVE_PRESET_DIR / "sdk_main.py").read_text(),
-            "report.py": (IMPROVE_PRESET_DIR / "report.py").read_text(),
-            "context.py": (IMPROVE_PRESET_DIR / "context.py").read_text(),
-            # Shipped from the service package rather than from the preset
-            # directory: the service re-reads a reported class against the
-            # same rules, so there must be exactly one copy of them. The
-            # module is stdlib-only for this reason.
-            "lessons.py": (
-                Path(__file__).parent / "improve" / "lessons.py"
-            ).read_text(),
-            "routing.py": (
-                Path(__file__).parent / "improve" / "routing.py"
-            ).read_text(),
-            "change_class.py": (
-                Path(__file__).parent / "improve" / "change_class.py"
-            ).read_text(),
-            "setup.sh": (IMPROVE_PRESET_DIR / "setup.sh").read_text(),
-            "builder_prompt.md": (IMPROVE_PRESET_DIR / "builder_prompt.md").read_text(),
-            "reviewer_prompt.md": (
-                IMPROVE_PRESET_DIR / "reviewer_prompt.md"
-            ).read_text(),
-            "handoff_prompt.md": (IMPROVE_PRESET_DIR / "handoff_prompt.md").read_text(),
-            "judge_prompt.md": (IMPROVE_PRESET_DIR / "judge_prompt.md").read_text(),
+            name: path.read_text() for name, path in sources.items()
         }
+        _IMPROVE_PRESET_STAMP = stamp
     return _IMPROVE_PRESET_CACHE
 
 
