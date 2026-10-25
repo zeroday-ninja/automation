@@ -483,6 +483,14 @@ async def claim_next_cycle(
     if resumed is not None:
         cycle.resumed_from_cycle_id = resumed.id
         resumed.resumed_by_cycle_id = cycle.id
+        if resumed.status is ImproveCycleStatus.PARKED:
+            # An answered park whose work has just been handed on is
+            # finished. Left PARKED it would be a cycle the janitor never
+            # closes and the graph draws as waiting for somebody for good --
+            # and the person it was waiting for has already answered.
+            resumed.status = ImproveCycleStatus.COMPLETED
+            resumed.completed_at = utcnow()
+            resumed.updated_at = utcnow()
         await session.flush()
 
     logger.info(

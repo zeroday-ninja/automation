@@ -844,6 +844,114 @@ def write_handoff(
     }
 
 
+def publish_resolved_cycle(workspace) -> bool:
+    """Finish a cycle whose parked question a person has answered.
+
+    Asked before the claim, because a question they have already answered
+    outranks starting something new — and because the work is already on a
+    branch, so finishing it costs a merge rather than a whole cycle. This is
+    the "resume" of raise-resolve-resume: without it, answering a park
+    recorded the answer and nothing acted on it.
+
+    Only ``approve`` arrives here. ``archive`` ended at the answer, and
+    ``cycle`` and ``return`` mean more work, which reaches the next ordinary
+    cycle as a handoff carrying what the person said.
+
+    Returns whether it handled something, so the caller knows not to claim.
+    """
+    try:
+        answered = cycle_request(
+            "POST",
+            f"/v1/improve/{automation_id}/continue",
+            {"run_id": automation_run_id} if automation_run_id else {},
+        )
+    except httpx.HTTPStatusError as exc:
+        # Never fatal: a run that cannot ask still has ordinary work to do.
+        print(f"  could not ask whether anything was answered: {exc}")
+        return False
+    if not answered:
+        return False
+
+    cycle = answered["cycle"]
+    config = answered["config"]
+    cycle_id = cycle["id"]
+    repository = cycle["repository"]
+    repo_label = repository["label"]
+    branch = cycle.get("branch")
+    pr_url = cycle.get("pr_url")
+    print("\n=== CONTINUE AN ANSWERED CYCLE ===")
+    print(f"  cycle {cycle_id}: {repo_label} on {branch}")
+    print(f"  they said: {str(answered.get('resolution'))[:200]}")
+    report_phase(f"{repo_label}: publishing what you approved")
+
+    authority = cycle_request("GET", f"/v1/improve/cycles/{cycle_id}/authority")
+    decisions = list(cycle.get("gate_decisions") or [])
+    decisions.append(
+        gate(
+            cycle.get("parked_phase") or "publish",
+            authority.get("route") or "return",
+            trigger="asked the service again, with their answer on the record",
+            rationale=clamp(authority.get("reason"), 1000)
+            or "the service gave no reason",
+            change_class=cycle.get("change_class"),
+            recommends="merge" if authority.get("authorised") else "wait",
+            decided_by="service",
+        )
+    )
+    if not authority.get("authorised"):
+        # Their answer was not the only thing standing in the way. Reported
+        # rather than published anyway, and left for them to read: the
+        # missing evidence is on the authority's own answer.
+        print(f"  not authorised: {authority.get('reason')}")
+        cycle_request(
+            "PATCH",
+            f"/v1/improve/cycles/{cycle_id}",
+            {"status": "PARKED", "gate_decisions": decisions},
+        )
+        report_phase(f"{repo_label}: still waiting — {authority.get('route')}")
+        return True
+
+    merged = None
+    if pr_url and config.get("merge_when_authorised", True):
+        # The clone exists only to run `gh` against the pull request; the
+        # change itself is already on the remote.
+        clone_result = workspace.clone_repos(
+            [{"url": repository["url"], "ref": repository.get("ref")}]
+        )
+        mapping = next(iter(clone_result.repo_mappings.values()), None)
+        if mapping is None:
+            print(f"  could not clone {repo_label} to merge it")
+        else:
+            merged = merge_pull_request(mapping.local_path, pr_url)
+            print(f"  merge: {'ok' if merged['merged'] else merged['detail']}")
+            decisions.append(
+                gate(
+                    "publish",
+                    "approve" if merged["merged"] else "return",
+                    trigger="merged the pull request they approved",
+                    rationale=merged["detail"] or "no output",
+                    change_class=cycle.get("change_class"),
+                    decided_by="cycle",
+                )
+            )
+
+    resolved_update: dict = {
+        "status": "COMPLETED",
+        "verdict": cycle.get("verdict") or "ACCEPTED",
+        "gate_decisions": decisions,
+    }
+    if merged and merged.get("merged"):
+        # Only what the forge actually said. `merge_outcome` leaves an answer
+        # it could not read absent rather than guessing, and a timestamp
+        # invented here would be indistinguishable from one it gave.
+        for field in ("merged_at", "merge_commit_sha"):
+            if merged.get(field):
+                resolved_update[field] = merged[field]
+    cycle_request("PATCH", f"/v1/improve/cycles/{cycle_id}", resolved_update)
+    report_phase(f"{repo_label}: published what you approved")
+    return True
+
+
 def execute_cycle(workspace) -> None:
     """Run one cycle to completion.
 
@@ -852,6 +960,10 @@ def execute_cycle(workspace) -> None:
     the context manager's ``__exit__`` as an exception and report a healthy
     no-op run as a failure.
     """
+    # A question they have already answered outranks starting something new.
+    if publish_resolved_cycle(workspace):
+        return
+
     # --- Claim the next repository in the rotation --------------------------
     report_phase("Claiming the next repository")
     print("\n=== CLAIM CYCLE ===")

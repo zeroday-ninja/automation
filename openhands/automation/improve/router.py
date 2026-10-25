@@ -28,7 +28,11 @@ from openhands.automation.improve.change_class import (
     normalize_change_class,
 )
 from openhands.automation.improve.config import ImproveProgramConfig
-from openhands.automation.improve.handoff import downgrade_unpushed, parse_handoff
+from openhands.automation.improve.handoff import (
+    Handoff,
+    downgrade_unpushed,
+    parse_handoff,
+)
 from openhands.automation.improve.lesson_router import (
     capture_resolution_as_lesson,
 )
@@ -50,6 +54,7 @@ from openhands.automation.improve.schemas import (
     BuilderShareResponse,
     ClaimCycleRequest,
     ClaimCycleResponse,
+    ContinueCycleResponse,
     CycleListResponse,
     CycleRepository,
     CycleResponse,
@@ -197,6 +202,24 @@ def _observed_at(value: Any) -> datetime:
     return _parse_instant(value) or datetime.now(UTC)
 
 
+def _resolved_route(cycle: AutomationImproveCycle) -> str | None:
+    """The route a person recorded against this cycle, if one did.
+
+    Read from the gate log rather than from a column of its own: the log is
+    where every routing decision already lives, and the person's answer is
+    the last decision on it that a person made.
+    """
+    if cycle.resolved_at is None:
+        return None
+    for decision in reversed(cycle.gate_decisions or []):
+        if not isinstance(decision, dict):
+            continue
+        if str(decision.get("decided_by") or "").startswith("user:"):
+            route = decision.get("route")
+            return str(route) if route else None
+    return None
+
+
 async def _resume_for(
     session: AsyncSession, cycle: AutomationImproveCycle
 ) -> HandoffResume | None:
@@ -225,6 +248,85 @@ async def _resume_for(
         files_touched=stored.get("files_touched") or [],
         written_by=stored.get("written_by"),
     )
+
+
+@router.post("/{automation_id}/continue")
+async def continue_cycle(
+    automation_id: uuid.UUID,
+    body: ClaimCycleRequest,
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session),
+) -> ContinueCycleResponse | None:
+    """Take an answered cycle, so a run finishes it instead of redoing it.
+
+    Asked before the claim, because a question a person has already answered
+    outranks starting something new — and because the work is already on a
+    branch, so continuing it costs a merge rather than a whole cycle.
+
+    ``None`` when there is nothing answered and waiting, which is the usual
+    case. A 204 would be the same statement in a shape the runner would have
+    to special-case.
+
+    The cycle stays PARKED until this hands it over, which is what makes the
+    handover exactly-once: the status moves under the program's row lock, so
+    two overlapping runs cannot both continue the same cycle. It goes back to
+    PARKED on nothing — a run that dies mid-publish leaves it answered and
+    waiting, and the next run picks it up again, because merging a change
+    that is already merged is a no-op while discarding an answer is not.
+    """
+    automation, config = await _load_program(
+        session, automation_id, user, for_update=True
+    )
+    waiting = (
+        (
+            await session.execute(
+                select(AutomationImproveCycle)
+                .where(
+                    AutomationImproveCycle.automation_id == automation.id,
+                    AutomationImproveCycle.status == ImproveCycleStatus.PARKED,
+                    AutomationImproveCycle.resolved_at.is_not(None),
+                    # Nothing routed back for more work: that goes round as a
+                    # builder's cycle through its handoff, and leaving it here
+                    # would hide the answered cycle behind it forever.
+                    AutomationImproveCycle.handoff.is_(None),
+                )
+                # Oldest first: an answer that has waited longest is the one
+                # the person is most likely wondering about.
+                .order_by(AutomationImproveCycle.resolved_at.asc())
+                .limit(1)
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if waiting is None:
+        return None
+    route = _resolved_route(waiting)
+    if route != "approve":
+        # The only route this finishes. `archive` ended at the resolve, and
+        # `cycle` and `return` mean *go round again* — the person asked for
+        # more work, which is a builder's cycle and reaches the next run
+        # through the handoff the resolve wrote. Guessing `approve` from a
+        # missing route would publish on an answer nobody gave.
+        if route is None:
+            logger.warning(
+                "Resolved cycle has no recorded route; leaving it waiting",
+                extra={"cycle_id": str(waiting.id)},
+            )
+        return None
+    waiting.status = ImproveCycleStatus.REVIEWING
+    waiting.run_id = body.run_id or waiting.run_id
+    waiting.updated_at = utcnow()
+    response = ContinueCycleResponse(
+        cycle=CycleResponse.of(waiting),
+        config=config,
+        resolution=waiting.resolution or "",
+        route=route,
+    )
+    # Committed before answering, for the reason the claim gives: the caller's
+    # next act is to report against this cycle id.
+    await session.commit()
+    return response
 
 
 @router.post("/{automation_id}/claim", status_code=status.HTTP_201_CREATED)
@@ -864,6 +966,12 @@ async def list_parked_cycles(
     question is never "which of this program's cycles are parked" -- it is
     "what is waiting on me", and an answer that needs the reader to know which
     program to look in is not an answer.
+
+    Answered cycles are *not* here. They stay PARKED until a run picks them
+    up, because that is the only status the janitor leaves alone and the only
+    one the graph draws as waiting -- but a question the reader has already
+    answered is no longer waiting on them, and leaving it in this list would
+    make the one surface that says "what is waiting on me" wrong.
     """
     limit = max(1, min(limit, 100))
     rows = (
@@ -873,6 +981,7 @@ async def list_parked_cycles(
                 .where(
                     AutomationImproveCycle.org_id == user.org_id,
                     AutomationImproveCycle.status == ImproveCycleStatus.PARKED,
+                    AutomationImproveCycle.resolved_at.is_(None),
                 )
                 .order_by(AutomationImproveCycle.parked_at.desc())
                 .limit(limit)
@@ -967,6 +1076,7 @@ async def get_cycle_authority(
         summary=cycle.summary,
         builder_runtime=cycle.builder_runtime,
         judge_attestation=cycle.judge_attestation,
+        resolved_route=_resolved_route(cycle),
     )
     return AuthorityResponse(
         cycle_id=cycle.id,
@@ -1002,6 +1112,18 @@ async def resolve_cycle(
                 "waiting to be answered"
             ),
         )
+    if cycle.resolved_at is not None:
+        # An answered cycle stays PARKED until a run carries the answer out,
+        # so "is it parked" no longer answers "is it waiting". Without this a
+        # second answer overwrote the first and appended another decision to
+        # the gate log, which is the record of who decided what.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=(
+                "This was already answered; it is waiting for a run to carry "
+                "that out"
+            ),
+        )
     cycle.resolution = body.resolution
     cycle.resolved_at = utcnow()
     decision = GateDecision(
@@ -1023,15 +1145,46 @@ async def resolve_cycle(
         cycle.status = ImproveCycleStatus.COMPLETED
         cycle.verdict = ImproveVerdict.REJECTED
         cycle.completed_at = cycle.resolved_at
-    else:
-        # Back to the phase it stopped at. The run that picks it up resumes
-        # from there; until then it is visibly in flight again rather than
-        # sitting in a queue nobody is watching.
-        cycle.status = (
-            ImproveCycleStatus.REVIEWING
-            if cycle.parked_phase in ("review", "judge", "publish")
-            else ImproveCycleStatus.BUILDING
+    # Every other route leaves it PARKED until a run takes it, which is the
+    # truth: answered, and still waiting — on a run now rather than on a
+    # person. It used to be put back to the phase it stopped at so that it
+    # read as in flight again, and three mechanisms believed that:
+    # the janitor closed it as abandoned on its next pass, because the run
+    # that parked it had ended; the graph counted it as work in flight, so
+    # clients polled forever on a cycle nobody was working on; and nothing
+    # picked it up, because the claim only ever opens a new cycle. The
+    # answer bought nothing at all.
+    #
+    # PARKED is already exempt from the janitor and already drawn as waiting,
+    # so the honest status is the one that needed no new machinery.
+    elif body.route in ("cycle", "return"):
+        # They asked for more work rather than for this to publish, and more
+        # work is a builder's cycle. Written as a handoff because that is the
+        # channel a next cycle already continues from: their words become its
+        # next steps, with the branch the work is already on.
+        resumable = downgrade_unpushed(
+            Handoff(
+                status="incomplete",
+                reason="parked_resolved",
+                branch=cycle.branch,
+                # The park happened at a gate the work had to be pushed to
+                # reach. A branch with no head recorded is one this cannot
+                # promise, and `downgrade_unpushed` re-aims the record at the
+                # plan rather than at a commit nobody can fetch.
+                branch_pushed=bool(cycle.branch and cycle.head_sha),
+                head_sha=cycle.head_sha,
+                stage=cycle.parked_phase or "publish",
+                goal=(cycle.parked_question or "")[:1000],
+                done=[],
+                next_steps=[body.resolution[:2000]],
+                do_not=[],
+                files_touched=list(cycle.changed_files or [])[:40],
+                written_by=f"user:{user.user_id}",
+                written_at=cycle.resolved_at.isoformat(),
+            )
         )
+        cycle.handoff = resumable.as_dict()
+
     # A correction the user actually made, recorded without asking them for
     # it. This is the line that separates learning from remembering: an
     # agent's guess about their preferences is a soul_suggestion they have to

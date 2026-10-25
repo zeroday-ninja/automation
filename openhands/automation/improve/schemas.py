@@ -817,6 +817,30 @@ class ClaimCycleResponse(BaseModel):
     )
 
 
+class ContinueCycleResponse(BaseModel):
+    """An answered cycle, handed to the run that will finish it.
+
+    The cycle rather than a new one: a resolved park is not work to redo. The
+    config comes with it because publishing reads the program's own settings
+    — whether it opens pull requests, whether it may merge — and those can
+    have changed while the question was waiting.
+    """
+
+    cycle: CycleResponse
+    config: ImproveProgramConfig
+    resolution: str = Field(
+        ...,
+        description="What the person said, in their words, for the record.",
+    )
+    route: str = Field(
+        ...,
+        description=(
+            "Where they sent it: 'approve' to publish, 'cycle' to go round "
+            "again, 'return' to send it back for more work."
+        ),
+    )
+
+
 class RotationResponse(BaseModel):
     """The program's rotation as it stands, for the dashboard."""
 
