@@ -810,6 +810,19 @@ def write_handoff(
         except OSError as exc:
             print(f"  could not read the handoff prose: {exc}")
 
+    # Why the code did not make it, on the record rather than in the log.
+    # `branch_pushed: false` says it is gone; a run log says why, and run
+    # logs are pruned — fifteen unsaved handoffs here and not one of them
+    # could still be asked.
+    save_note = saved.get("note")
+    if save_note is None and not pushed:
+        save_note = (
+            "The builder had committed nothing and left nothing uncommitted, "
+            "so there was nothing to push."
+            if not saved.get("committed")
+            else "The commit was made and the push did not report a reason."
+        )
+
     written = read_json_report(os.path.join(cycle_dir, "handoff.json")) or {}
     shas = git_commit_range(repo_path, base_ref, branch)
     if written.get("next_steps"):
@@ -818,6 +831,8 @@ def write_handoff(
         written.setdefault("head_sha", shas.get("head_sha"))
         written.setdefault("status", "incomplete")
         written.setdefault("reason", reason)
+        if save_note is not None:
+            written["save_note"] = save_note
         return written
 
     # Nothing readable. A record built from git alone still tells the next
@@ -844,6 +859,7 @@ def write_handoff(
         ],
         "do_not": [],
         "files_touched": [],
+        "save_note": save_note,
     }
 
 

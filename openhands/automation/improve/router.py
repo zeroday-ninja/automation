@@ -1178,6 +1178,7 @@ async def resolve_cycle(
                 next_steps=[body.resolution[:2000]],
                 do_not=[],
                 files_touched=list(cycle.changed_files or [])[:40],
+                save_note=None,
                 written_by=f"user:{user.user_id}",
                 written_at=cycle.resolved_at.isoformat(),
             )

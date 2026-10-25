@@ -111,3 +111,37 @@ def test_a_branch_that_moved_is_not_resumed_from() -> None:
     assert is_resumable(stored, "a1b2c3d") is True
     assert is_resumable(stored, "9999999") is False
     assert is_resumable({**stored, "branch_pushed": False}, "a1b2c3d") is False
+
+
+def test_why_the_code_did_not_make_it_survives_the_parse() -> None:
+    """`branch_pushed: false` says the code is gone; this says why.
+
+    The reason was printed to the run's log and nowhere else, and run logs
+    are pruned: fifteen unsaved handoffs on one machine, not one of them
+    still answerable. A degraded path writes its reason onto the record.
+    """
+    parsed = parse_handoff(
+        {
+            "next_steps": ["Continue from the plan."],
+            "branch": "improve/20261025-0140",
+            "branch_pushed": False,
+            "save_note": "could not commit the working tree: index.lock exists",
+        }
+    )
+
+    assert parsed is not None
+    assert parsed.save_note == "could not commit the working tree: index.lock exists"
+    # And it survives the re-aiming an unpushed branch gets, which is exactly
+    # when a reader wants it.
+    assert downgrade_unpushed(parsed).as_dict()["save_note"] == parsed.save_note
+
+
+def test_a_handoff_that_saved_its_work_records_no_reason() -> None:
+    # Empty rather than a sentence saying nothing went wrong: a field that is
+    # always filled is a field nobody reads.
+    parsed = parse_handoff(
+        {"next_steps": ["Continue."], "branch_pushed": True, "save_note": "   "}
+    )
+
+    assert parsed is not None
+    assert parsed.save_note is None
