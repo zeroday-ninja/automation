@@ -752,7 +752,7 @@ async def get_builder_share(
     if automation_id is not None:
         _, config = await _load_program(session, automation_id, user)
         expected = len({config.builder_profile_id, *config.rotate_builder})
-    shares, since, covered = await builder_share(
+    shares, since, covered, unattributed = await builder_share(
         session, user.org_id, days=window, automation_id=automation_id
     )
     faults = await rotation_faults(
@@ -779,6 +779,7 @@ async def get_builder_share(
         ],
         evenness_gap=gap,
         within_target=within,
+        unattributed_cycles=unattributed,
         misattributed_cycles=faults.misattributed,
         work_redone=faults.redone,
         handoffs_waiting=faults.waiting,
