@@ -149,6 +149,40 @@ def test_what_a_cycle_was_told_is_recorded_before_it_can_be_lost(runner) -> None
     assert carrying[0].get("status") == "BUILDING"
 
 
+def test_a_timed_out_builder_is_not_asked_to_describe_itself(runner) -> None:
+    """One of milestone 4's four handoff failure modes, and the costly one.
+
+    A builder that ran out of *usage* has refused and can still answer, so
+    the handoff asks it. A builder that ran out of *time* is, as far as the
+    server is concerned, still working — asking it waits out another whole
+    timeout before answering nothing, and the cycle after it waits too.
+
+    `ask_runtime=not out_of_time` is the line that keeps those apart, and
+    nothing asserted it. Asserted against the source because the runner
+    executes a whole cycle on import and cannot be called.
+    """
+    # Act: the keyword as the handoff is actually called.
+    calls = [
+        node
+        for node in ast.walk(runner)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "write_handoff"
+    ]
+
+    # Assert
+    assert len(calls) == 1, "the handoff is written in one place; move or fix this"
+    asked = next(
+        keyword.value for keyword in calls[0].keywords if keyword.arg == "ask_runtime"
+    )
+    # `not out_of_time` — a literal `True` here would wait out a second full
+    # timeout on every cycle that ran long.
+    assert isinstance(asked, ast.UnaryOp)
+    assert isinstance(asked.op, ast.Not)
+    assert isinstance(asked.operand, ast.Name)
+    assert asked.operand.id == "out_of_time"
+
+
 def _constants(node: ast.Dict) -> dict:
     """The dict literal's string-keyed constant values."""
     found = {}
