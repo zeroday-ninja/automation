@@ -56,6 +56,13 @@ def normalise_repository_url(url: str | None) -> str | None:
     text = text.rstrip("/")
     if text.endswith(".git"):
         text = text[: -len(".git")]
+    if "/" not in text:
+        # Not a url at all: a repository is a host and a path, so a bare name
+        # like `HAZARD` has nothing to normalise. Returning `hazard` here
+        # would hand it a url-shaped identity that no real repository can
+        # ever equal — the caller's label fallback is the honest answer, and
+        # it says plainly that all anybody had was a name.
+        return None
     # Lowercased: the forges this talks to treat a host and an owner/name
     # case-insensitively, and two cases of one name sharing an allowance is
     # the right way round to be wrong.

@@ -1120,8 +1120,7 @@ async def resolve_cycle(
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail=(
-                "This was already answered; it is waiting for a run to carry "
-                "that out"
+                "This was already answered; it is waiting for a run to carry that out"
             ),
         )
     cycle.resolution = body.resolution

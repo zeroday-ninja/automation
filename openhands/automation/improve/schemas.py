@@ -7,10 +7,12 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    computed_field,
     field_validator,
     model_validator,
 )
 
+from openhands.automation.improve.caps import repository_identity
 from openhands.automation.improve.config import ImproveProgramConfig
 from openhands.automation.improve.routing import ROUTES, normalize_route
 from openhands.automation.models import (
@@ -40,6 +42,20 @@ class CycleRepository(BaseModel):
         default=None,
         description="The Git Sync remote this entry came from, when it came from one.",
     )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def identity(self) -> str:
+        """What makes this the same repository wherever it is reached from.
+
+        Computed here rather than by each caller, because the callers are the
+        daily cap, a lesson's subject and the runner that filters corrections
+        by repository — and the whole class of defect this answers is those
+        three disagreeing. A program that lists its repositories by hand and
+        one that reaches the same repository through a Git Sync remote get
+        the same value, which they did not when each spelled it its own way.
+        """
+        return repository_identity(self.remote_id, self.label, self.url)
 
 
 class CitedSource(BaseModel):
