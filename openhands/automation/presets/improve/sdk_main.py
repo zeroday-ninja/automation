@@ -155,6 +155,7 @@ from context import (  # noqa: E402
     project_identity_sections,
     prompt_digest,
     read_project_identity,
+    save_work_in_progress,
     trace_runtime,
 )
 from report import (  # noqa: E402
@@ -760,6 +761,13 @@ def write_handoff(
     asking it to describe itself waits out another whole timeout before
     answering nothing. Git alone is the better trade there.
     """
+    # The code before the description, which is the order the plan asks for
+    # and the order this did not follow: the builder prompt commits and
+    # pushes in one step at the end, so a builder interrupted mid-change had
+    # committed nothing, and this function used to *observe* that the branch
+    # was unpushed rather than push it. The sandbox is still up here; it is
+    # the last moment anything can be saved.
+    saved = save_work_in_progress(repo_path, branch, base_ref=base_ref, reason=reason)
     if ask_runtime:
         try:
             prompt = render(load_template("handoff_prompt.md"), {"BRANCH": branch})
@@ -769,7 +777,12 @@ def write_handoff(
 
     written = read_json_report(os.path.join(cycle_dir, "handoff.json")) or {}
     shas = git_commit_range(repo_path, base_ref, branch)
+    # Asked of the remote rather than taken from the push's exit code: a push
+    # that reported success and left nothing there would be the same silent
+    # loss in a new place.
     pushed = branch_is_pushed(repo_path, branch)
+    if saved.get("note") and not pushed:
+        print(f"  the work was not saved: {saved['note']}")
     if written.get("next_steps"):
         written.setdefault("branch", branch)
         written["branch_pushed"] = pushed
@@ -924,7 +937,7 @@ def execute_cycle(workspace) -> None:
         # A fresh branch would leave their commits behind and produce a second
         # change that does the same thing.
         resume = claim.get("resume") if isinstance(claim, dict) else None
-        if isinstance(resume, dict) and resume.get("branch_pushed", True):
+        if isinstance(resume, dict) and resume.get("branch_pushed"):
             resumed_branch = resume.get("branch")
             if isinstance(resumed_branch, str) and resumed_branch:
                 branch = resumed_branch

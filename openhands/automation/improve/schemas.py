@@ -454,6 +454,11 @@ class BuilderShareResponse(BaseModel):
     #: but reported, because a number that only counts failures cannot show
     #: work quietly piling up.
     handoffs_waiting: int = 0
+    #: Handoffs whose branch never reached the remote. The reasoning survived
+    #: and the code did not, so the next cycle rebuilt the change from
+    #: scratch -- and ``work_redone`` read zero throughout, because the
+    #: handoffs were resumed exactly as intended.
+    handoffs_unsaved: int = 0
 
 
 class ProvenanceResponse(BaseModel):
@@ -776,6 +781,14 @@ class HandoffResume(BaseModel):
     #: more than fits in a cycle and the next attempt should be smaller.
     reason: str | None = None
     branch: str | None = None
+    #: Whether that branch reached the remote. Without this field the cycle
+    #: continuing the work could not tell -- and both the preset and its
+    #: context renderer read it with a default of ``True``, so four live
+    #: cycles were told to continue a branch whose commits existed only in a
+    #: deleted sandbox. It defaults to False here for the same reason: an
+    #: unknown that is treated as pushed loses the work silently, while one
+    #: treated as unpushed costs a fresh branch.
+    branch_pushed: bool = False
     head_sha: str | None = None
     stage: str | None = None
     goal: str | None = None

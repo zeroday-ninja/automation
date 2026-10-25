@@ -28,7 +28,7 @@ from openhands.automation.improve.change_class import (
     normalize_change_class,
 )
 from openhands.automation.improve.config import ImproveProgramConfig
-from openhands.automation.improve.handoff import parse_handoff
+from openhands.automation.improve.handoff import downgrade_unpushed, parse_handoff
 from openhands.automation.improve.lesson_router import (
     capture_resolution_as_lesson,
 )
@@ -215,6 +215,7 @@ async def _resume_for(
         from_cycle_id=cycle.resumed_from_cycle_id,
         reason=stored.get("reason"),
         branch=stored.get("branch"),
+        branch_pushed=bool(stored.get("branch_pushed")),
         head_sha=stored.get("head_sha"),
         stage=stored.get("stage"),
         goal=stored.get("goal"),
@@ -384,7 +385,15 @@ async def update_cycle(
         # A handoff with no next step is indistinguishable from a restart, so
         # one without is treated as absent rather than stored and half-
         # trusted by whatever picks it up.
-        cycle.handoff = parsed.as_dict() if parsed is not None else None
+        #
+        # One whose branch never reached the remote is re-aimed at redoing the
+        # work from the plan. The reasoning is most of a handoff's value and
+        # it survives; "read the branch diff" does not, because a new sandbox
+        # cannot see an unpushed branch, and a next step nobody can carry out
+        # is what made four live handoffs look like successful handovers.
+        cycle.handoff = (
+            downgrade_unpushed(parsed).as_dict() if parsed is not None else None
+        )
     if "gate_decisions" in updates and body.gate_decisions:
         # Appended, never replaced: a routing decision that was taken cannot
         # be un-taken by a later report, and the log is what answers "why did
@@ -783,6 +792,7 @@ async def get_builder_share(
         misattributed_cycles=faults.misattributed,
         work_redone=faults.redone,
         handoffs_waiting=faults.waiting,
+        handoffs_unsaved=faults.unsaved,
     )
 
 
