@@ -776,12 +776,31 @@ def write_handoff(
         except Exception as exc:  # noqa: BLE001 - nothing here may fail the cycle
             print(f"  the runtime could not write its own handoff: {exc}")
 
+    # Two questions that look alike and are not, each of which was being
+    # answered with the other's answer:
+    #
+    #   `pushed`          — is there a branch on the remote for the next
+    #                       cycle to see? Asked of the remote, because a push
+    #                       that reported success and left nothing there would
+    #                       be the same silent loss in a new place.
+    #   `saved["pushed"]` — did *this* cycle get its work onto that branch?
+    #
+    # They differ exactly when an earlier cycle pushed the branch and this one
+    # could not add to it — and that is the case worth hearing about, because
+    # a cycle's work was dropped. The note was gated on the remote's answer,
+    # so the remote already having the branch silenced the one report that
+    # said work had been lost. The prose was gated on this cycle's push, so a
+    # branch that was on the remote all along got no prose attached.
+    pushed = branch_is_pushed(repo_path, branch)
+    if saved.get("note") and not saved.get("pushed"):
+        print(f"  the work was not saved: {saved['note']}")
+
     # The prose, onto the branch. Step 2 of the four the handoff prompt asks
-    # for, and until now the only one with nowhere to land: it was written to
-    # the cycle's scratch directory, which is a sibling of the clone and goes
-    # with the sandbox, and nothing ever read it.
+    # for, and until this it was the only one with nowhere to land: it was
+    # written to the cycle's scratch directory, a sibling of the clone, and
+    # nothing ever read it.
     prose_path = os.path.join(cycle_dir, "handoff.md")
-    if saved.get("pushed") and os.path.exists(prose_path):
+    if pushed and os.path.exists(prose_path):
         try:
             with open(prose_path, encoding="utf-8") as handle:
                 commit_handoff_prose(repo_path, branch, handle.read())
@@ -790,12 +809,6 @@ def write_handoff(
 
     written = read_json_report(os.path.join(cycle_dir, "handoff.json")) or {}
     shas = git_commit_range(repo_path, base_ref, branch)
-    # Asked of the remote rather than taken from the push's exit code: a push
-    # that reported success and left nothing there would be the same silent
-    # loss in a new place.
-    pushed = branch_is_pushed(repo_path, branch)
-    if saved.get("note") and not pushed:
-        print(f"  the work was not saved: {saved['note']}")
     if written.get("next_steps"):
         written.setdefault("branch", branch)
         written["branch_pushed"] = pushed
