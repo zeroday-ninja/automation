@@ -20,10 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from openhands.automation.git_sync.config_override import effective_settings_for
 from openhands.automation.improve.caps import (
     DEFAULT_DAILY_CYCLES_PER_REPOSITORY,
-    cycles_today,
+    cycles_today_by_repository,
     cycles_today_for_org,
     local_day_bounds,
     next_day_boundary,
+    repository_identity,
 )
 from openhands.automation.improve.config import ImproveProgramConfig
 from openhands.automation.improve.url import strip_credentials
@@ -358,15 +359,15 @@ async def next_available_index(
     repository was actually taken.
     """
     start = next_index(repositories, previous)
+    # One read of the day for the whole scan, rather than one query per
+    # candidate: identity is decided in Python, so the counts come back
+    # already bucketed.
+    counts = await cycles_today_by_repository(session, automation.org_id, timezone_name)
     for offset in range(len(repositories)):
         candidate = repositories[(start + offset) % len(repositories)]
-        taken = await cycles_today(
-            session,
-            automation.org_id,
-            remote_id=candidate.remote_id,
-            label=candidate.label,
-            timezone_name=timezone_name,
-        )
+        taken = counts[
+            repository_identity(candidate.remote_id, candidate.label, candidate.url)
+        ]
         if taken < daily_cap:
             return (start + offset) % len(repositories)
     raise AllRepositoriesCappedError(next_day_boundary(timezone_name))
@@ -396,11 +397,14 @@ async def _claim_handoff(
         .limit(20)
     )
     for candidate in (await session.execute(query)).scalars().all():
-        same_repository = (
-            candidate.remote_id == chosen.remote_id
-            if chosen.remote_id is not None
-            else candidate.repo_label == chosen.label
-        )
+        # The same identity the cap uses, so a repository configured one way
+        # in one program and another way in a second is one repository to
+        # both. Matching on the remote id alone left a handoff written by a
+        # hand-configured program invisible to a git-synced one, which is a
+        # cycle redoing work that was already saved.
+        same_repository = repository_identity(
+            candidate.remote_id, candidate.repo_label, candidate.repo_url
+        ) == repository_identity(chosen.remote_id, chosen.label, chosen.url)
         if not same_repository:
             continue
         stored = candidate.handoff
