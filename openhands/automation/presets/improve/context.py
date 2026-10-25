@@ -320,6 +320,105 @@ def branch_is_pushed(repo_path: str, branch: str) -> bool:
     return result.returncode == 0
 
 
+def save_work_in_progress(
+    repo_path: str, branch: str, *, base_ref: str, reason: str
+) -> dict:
+    """Put whatever the builder had onto the remote, before describing it.
+
+    The handoff's order of priority is the code first and the description
+    second, and until this existed the order was the other way round: the
+    builder prompt commits and pushes in one step at the very end, so a
+    builder that ran out mid-change had typically committed nothing. The
+    handoff then recorded ``branch_pushed: false`` and told the next cycle to
+    read a diff that lived only in a sandbox about to be deleted. Four live
+    cycles were handed that.
+
+    Costs no tokens -- every step is git -- and runs while the sandbox is
+    still up, which is the only moment it can.
+
+    Returns what it actually managed. A push that fails is reported, not
+    passed over: the next cycle has to be told what is on the remote rather
+    than what was intended.
+    """
+
+    def git(*args: str, timeout: int = 180) -> subprocess.CompletedProcess | None:
+        try:
+            return subprocess.run(
+                ["git", "-C", repo_path, *args],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"  git {args[0]} failed: {exc}")
+            return None
+
+    saved: dict = {"branch": branch, "committed": False, "pushed": False}
+
+    head = git("rev-parse", "--abbrev-ref", "HEAD")
+    on_branch = (
+        head is not None and head.returncode == 0 and head.stdout.strip() == branch
+    )
+    if not on_branch:
+        # Only create it. Moving an existing branch to this HEAD would throw
+        # away commits somebody already put on it, which is the one outcome
+        # worse than losing an uncommitted tree.
+        exists = git("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}")
+        if exists is not None and exists.returncode == 0:
+            saved["note"] = (
+                f"{branch} exists but the builder left HEAD elsewhere; "
+                "its work was not moved onto it"
+            )
+            print(f"  {saved['note']}")
+            return saved
+        made = git("checkout", "-b", branch)
+        if made is None or made.returncode != 0:
+            detail = made.stderr.strip()[:200] if made else "git could not run"
+            saved["note"] = f"could not put the work on {branch}: {detail}"
+            print(f"  {saved['note']}")
+            return saved
+
+    dirty = git("status", "--porcelain")
+    if dirty is not None and dirty.returncode == 0 and dirty.stdout.strip():
+        staged = git("add", "--all")
+        message = (
+            f"wip: {reason}\n\n"
+            "Saved by the improvement cycle so the next one can continue it."
+        )
+        # `--no-verify`: a repository's own pre-commit hook rejecting a
+        # half-finished tree would lose the whole change, and this commit
+        # exists to be continued rather than to be reviewed.
+        made = git("commit", "--no-verify", "-m", message) if staged else None
+        if made is not None and made.returncode == 0:
+            saved["committed"] = True
+        else:
+            detail = made.stderr.strip()[:200] if made else "git could not run"
+            saved["note"] = f"could not commit the working tree: {detail}"
+            print(f"  {saved['note']}")
+
+    # Nothing on the branch means nothing to push, and a push that would
+    # create an empty branch is noise rather than a saved change. Counted
+    # against the cycle's own base rather than the remote's default branch:
+    # a program targeting any other ref would otherwise count the difference
+    # between the two as work.
+    ahead = git("rev-list", "--count", f"{base_ref}..{branch}")
+    if ahead is not None and ahead.returncode == 0 and ahead.stdout.strip() == "0":
+        saved["note"] = saved.get("note") or "the builder produced no commits to save"
+        print(f"  {saved['note']}")
+        return saved
+
+    pushed = git("push", "--set-upstream", "origin", branch, timeout=300)
+    if pushed is not None and pushed.returncode == 0:
+        saved["pushed"] = True
+        print(f"  saved the interrupted work on {branch}")
+    else:
+        detail = pushed.stderr.strip()[:200] if pushed else "git could not run"
+        saved["note"] = f"could not push {branch}: {detail}"
+        print(f"  {saved['note']}")
+    return saved
+
+
 def prompt_digest(prompt: str) -> str:
     """A fingerprint of the rendered prompt.
 
@@ -518,7 +617,7 @@ def resume_section(resume: dict | None) -> str:
     if resume.get("goal"):
         lines += [f"**What it was doing:** {resume['goal']}", ""]
     if resume.get("branch"):
-        pushed = resume.get("branch_pushed", True)
+        pushed = bool(resume.get("branch_pushed"))
         lines += [
             f"**Its branch:** `{resume['branch']}`"
             + ("" if pushed else " — never pushed, so its commits are gone"),

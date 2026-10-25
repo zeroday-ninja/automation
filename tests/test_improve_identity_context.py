@@ -446,3 +446,130 @@ def test_a_cycle_with_nothing_to_continue_is_told_nothing(preset) -> None:
     # which would read as "someone tried and left you no detail".
     assert preset.resume_section(None) == ""
     assert preset.resume_section({}) == ""
+
+
+def _repo_with_a_remote(tmp_path):
+    """A clone with somewhere to push to, which is what `pushed` means."""
+    import subprocess
+
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+    work = tmp_path / "work"
+    subprocess.run(["git", "clone", "-q", str(remote), str(work)], check=True)
+    git = ["git", "-C", str(work)]
+    subprocess.run([*git, "config", "user.email", "cycle@example.test"], check=True)
+    subprocess.run([*git, "config", "user.name", "Cycle"], check=True)
+    (work / "README.md").write_text("start\n")
+    subprocess.run([*git, "add", "README.md"], check=True)
+    subprocess.run([*git, "commit", "-qm", "start"], check=True)
+    subprocess.run([*git, "push", "-q", "origin", "HEAD:main"], check=True)
+    subprocess.run([*git, "remote", "set-head", "origin", "main"], check=True)
+    return work
+
+
+def test_an_interrupted_builders_work_reaches_the_remote(preset, tmp_path) -> None:
+    """The code before the description, which is the order the plan asks for.
+
+    The builder prompt commits and pushes in one step at the very end, so a
+    builder interrupted mid-change has a dirty tree and no commits — in a
+    sandbox that is about to be deleted. The handoff used to *observe* that
+    and tell the next cycle to read a diff nobody could reach.
+    """
+    # Arrange: work in progress, nothing committed, no branch yet.
+    work = _repo_with_a_remote(tmp_path)
+    (work / "feature.py").write_text("def added():\n    return 1\n")
+    (work / "README.md").write_text("start\nchanged\n")
+
+    # Act
+    saved = preset.save_work_in_progress(
+        str(work),
+        "improve/20261025-0700",
+        base_ref="origin/main",
+        reason="ran out of time",
+    )
+
+    # Assert: on the remote, where the next cycle's fresh sandbox can see it.
+    assert saved["committed"] is True
+    assert saved["pushed"] is True
+    assert preset.branch_is_pushed(str(work), "improve/20261025-0700") is True
+
+
+def test_it_will_not_move_a_branch_that_already_has_commits(preset, tmp_path) -> None:
+    """Losing an uncommitted tree is bad; discarding commits is worse.
+
+    Pointing an existing branch at this HEAD to carry the tree across would
+    throw away whatever was already on it, so the work is left where it is
+    and the record says why.
+    """
+    # Arrange: a branch with a commit on it, and HEAD somewhere else.
+    import subprocess
+
+    work = _repo_with_a_remote(tmp_path)
+    git = ["git", "-C", str(work)]
+    subprocess.run([*git, "checkout", "-q", "-b", "improve/taken"], check=True)
+    (work / "earlier.py").write_text("earlier\n")
+    subprocess.run([*git, "add", "earlier.py"], check=True)
+    subprocess.run([*git, "commit", "-qm", "earlier work"], check=True)
+    kept = subprocess.run(
+        [*git, "rev-parse", "improve/taken"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    subprocess.run([*git, "checkout", "-q", "main"], check=True)
+    (work / "later.py").write_text("later\n")
+
+    # Act
+    saved = preset.save_work_in_progress(
+        str(work), "improve/taken", base_ref="origin/main", reason="ran out of time"
+    )
+
+    # Assert: refused, said so, and the earlier commit is still the tip.
+    assert saved["pushed"] is False
+    assert "exists" in saved["note"]
+    still = subprocess.run(
+        [*git, "rev-parse", "improve/taken"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert still == kept
+
+
+def test_a_clean_tree_is_reported_rather_than_pushed_empty(preset, tmp_path) -> None:
+    # Arrange: the builder changed nothing before it ran out.
+    work = _repo_with_a_remote(tmp_path)
+
+    # Act
+    saved = preset.save_work_in_progress(
+        str(work),
+        "improve/20261025-0800",
+        base_ref="origin/main",
+        reason="ran out of time",
+    )
+
+    # Assert: an empty branch on the remote is noise, and saying "no commits
+    # to save" is the difference between nothing happened and something was
+    # lost.
+    assert saved["committed"] is False
+    assert saved["pushed"] is False
+    assert "no commits" in saved["note"]
+
+
+def test_a_handoff_that_does_not_say_is_treated_as_unpushed(preset) -> None:
+    """An unknown goes the safe way round.
+
+    This defaulted a missing `branch_pushed` to True, and the service never
+    sent the field at all — `HandoffResume` did not declare it and forbids
+    extras — so every resume was presented as a branch to carry on from. Four
+    live cycles continued a branch whose commits existed only in a sandbox
+    that had already been deleted.
+
+    Read as pushed, an unknown loses the work in silence. Read as unpushed, it
+    costs one fresh branch.
+    """
+    # Act: no `branch_pushed` key at all, which is what an older service sends.
+    section = preset.resume_section(
+        {
+            "reason": "timed_out",
+            "branch": "improve/20261025-0100",
+            "next_steps": ["Finish the migration."],
+        }
+    )
+
+    # Assert
+    assert "commits are gone" in section

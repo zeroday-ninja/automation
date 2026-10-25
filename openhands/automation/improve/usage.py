@@ -564,6 +564,12 @@ class RotationFaults:
     #: but reported, because a number that only ever counts failures cannot
     #: show work quietly piling up.
     waiting: int
+    #: Handoffs whose branch never reached the remote, so the code they were
+    #: handing over is gone and only the reasoning survived. Counted
+    #: separately from ``redone`` because these *were* resumed, correctly,
+    #: and still cost the next cycle the whole change: ``redone`` sat at zero
+    #: through four of them.
+    unsaved: int
 
 
 async def rotation_faults(
@@ -598,6 +604,7 @@ async def rotation_faults(
     ).all()
 
     misattributed = 0
+    unsaved = 0
     unresumed: list[tuple[str, datetime]] = []
     newest_on_repo: dict[str, datetime] = {}
     for runtime, switches, handoff, resumed_by, repo_url, created_at in rows:
@@ -618,10 +625,11 @@ async def rotation_faults(
             isinstance(handoff, dict)
             and handoff.get("status") == "incomplete"
             and handoff.get("next_steps")
-            and resumed_by is None
-            and repo_url
         ):
-            unresumed.append((repo_url, stamp))
+            if not handoff.get("branch_pushed"):
+                unsaved += 1
+            if resumed_by is None and repo_url:
+                unresumed.append((repo_url, stamp))
 
     redone = sum(
         1
@@ -632,4 +640,5 @@ async def rotation_faults(
         misattributed=misattributed,
         redone=redone,
         waiting=len(unresumed) - redone,
+        unsaved=unsaved,
     )

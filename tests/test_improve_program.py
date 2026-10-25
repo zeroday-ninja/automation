@@ -508,6 +508,61 @@ class TestTheBuilderShare:
         body = response.json()
         assert (body["work_redone"], body["handoffs_waiting"]) == (0, 0)
 
+    async def test_a_handoff_that_saved_no_code_is_counted(
+        self, async_client, async_session
+    ):
+        """`work_redone` read zero through four handoffs that lost their work.
+
+        It counts handoffs nobody resumed. These were resumed, correctly and
+        promptly — and their branch had never reached the remote, so the
+        cycle that picked each one up rebuilt the change from nothing. A
+        measure that cannot see that is a measure the plan's "zero cycles
+        that redo work" can sit at zero behind.
+        """
+        # Arrange: resumed exactly as intended, with nothing to resume.
+        program = await create_program(async_client)
+        lost = await self._cycle(
+            async_session,
+            program["id"],
+            builder_runtime="claude-code",
+            handoff={
+                "status": "incomplete",
+                "branch": "improve/20261025-0100",
+                "branch_pushed": False,
+                "next_steps": ["Carry on."],
+            },
+            days_ago=2,
+        )
+        kept = await self._cycle(
+            async_session,
+            program["id"],
+            builder_runtime="codex",
+            handoff={
+                "status": "incomplete",
+                "branch": "improve/20261025-0200",
+                "branch_pushed": True,
+                "next_steps": ["Carry on."],
+            },
+            repo_url="https://github.com/acme/beta",
+            days_ago=2,
+        )
+        picked_up = await self._cycle(
+            async_session, program["id"], builder_runtime="codex", days_ago=1
+        )
+        lost.resumed_by_cycle_id = picked_up.id
+        kept.resumed_by_cycle_id = picked_up.id
+        await async_session.commit()
+
+        # Act
+        response = await async_client.get(
+            "/api/automation/v1/improve/builder-share?days=7"
+        )
+
+        # Assert: the fault is visible even though the handover worked.
+        body = response.json()
+        assert body["handoffs_unsaved"] == 1
+        assert (body["work_redone"], body["handoffs_waiting"]) == (0, 0)
+
     async def test_an_even_rotation_is_within_the_target(
         self, async_client, async_session
     ):
@@ -2249,12 +2304,17 @@ class TestTheHandoffIsVisible:
             },
         )
 
-        # Assert
+        # Assert: stored, and re-aimed. The fallback's branch never reached
+        # the remote, so "read the branch diff" is an instruction the next
+        # cycle's fresh sandbox cannot carry out; the reasoning is what
+        # survives and the record says to redo the work from it.
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["handoff"] is not None
-        assert body["handoff"]["next_steps"] == self.FALLBACK["next_steps"]
         assert body["handoff"]["reason"] == "runtime_exhausted"
+        assert body["handoff"]["branch"] is None
+        assert "never pushed" in body["handoff"]["next_steps"][0]
+        assert self.FALLBACK["next_steps"][0] in body["handoff"]["next_steps"]
 
     async def test_the_next_cycle_says_which_one_it_continues(self, async_client):
         # Arrange: one cycle hands over.
@@ -2281,13 +2341,52 @@ class TestTheHandoffIsVisible:
         assert second["resumed_from_cycle_id"] == first
         resume = claimed.json()["resume"]
         assert resume is not None
-        assert resume["next_steps"] == self.FALLBACK["next_steps"]
+        assert self.FALLBACK["next_steps"][0] in resume["next_steps"]
+        # Whether the branch is there to continue from, which the runner acts
+        # on: the field was absent from `HandoffResume`, which forbids extras,
+        # so both the runner and its context renderer fell back to assuming
+        # it was pushed and continued a branch that did not exist.
+        assert resume["branch_pushed"] is False
 
         history = await async_client.get(
             f"/api/automation/v1/improve/{program['id']}/cycles"
         )
         by_id = {c["id"]: c for c in history.json()["cycles"]}
         assert by_id[first]["resumed_by_cycle_id"] == second["id"]
+
+    async def test_a_handoff_that_saved_its_work_is_offered_as_a_branch(
+        self, async_client
+    ):
+        """The other half of the same rule, so the cure cannot be worse.
+
+        When the branch is on the remote there is a commit to carry on from,
+        and re-aiming the record at redoing the work would throw away exactly
+        what the handoff managed to preserve.
+        """
+        # Arrange
+        await add_remote(async_client, "https://github.com/acme/gamma", "gamma")
+        program = await create_program(async_client)
+        first = (await claim(async_client, program["id"])).json()["cycle"]["id"]
+        await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{first}",
+            json={
+                "status": "FAILED",
+                "builder_runtime": "claude-code",
+                "handoff": {
+                    **self.FALLBACK,
+                    "branch_pushed": True,
+                    "head_sha": "a1b2c3d4e5f6",
+                },
+            },
+        )
+
+        # Act
+        resume = (await claim(async_client, program["id"])).json()["resume"]
+
+        # Assert
+        assert resume["branch_pushed"] is True
+        assert resume["branch"] == self.FALLBACK["branch"]
+        assert resume["next_steps"] == self.FALLBACK["next_steps"]
 
     async def test_work_abandoned_to_a_timeout_is_resumed_like_any_other(
         self, async_client
