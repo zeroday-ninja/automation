@@ -84,6 +84,31 @@ def test_an_attested_deletion_from_another_runtime_publishes() -> None:
     assert "codex" in authority.reason
 
 
+def test_a_deletion_cannot_be_signed_by_an_unknown_author() -> None:
+    """The signer is never the author — and "cannot tell" is not "is not".
+
+    The comparison needed both runtimes to be known, so a cycle whose builder
+    runtime was never recorded passed it: the deletion published, and the
+    reason given even said the signer "did not build this change", which the
+    service had no way to know.
+
+    That is reachable without anybody misbehaving. The cycle's progress report
+    is deliberately non-fatal — the work matters more than the record — so a
+    dropped PATCH leaves `builder_runtime` null on a cycle that ran fine.
+    """
+    unknown_author = {**READY, "builder_runtime": None}
+
+    authority = resolve_authority(
+        change_class="deleting", judge_attestation=ATTESTED, **unknown_author
+    )
+
+    # Refused, and refused for the reason that is actually missing, so the
+    # next cycle knows what to supply rather than retrying the attestation.
+    assert authority.authorised is False
+    assert authority.route == "return"
+    assert "builder_runtime" in authority.missing
+
+
 def test_a_deletion_with_no_attestation_waits_rather_than_cycling() -> None:
     authority = resolve_authority(
         change_class="deleting", judge_attestation=None, **READY
