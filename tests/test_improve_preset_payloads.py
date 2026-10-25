@@ -119,6 +119,45 @@ class TestTheRunnerSendsOnlyFieldsTheServiceAccepts:
             )
 
 
+def test_what_a_cycle_was_told_is_recorded_before_it_can_be_lost(runner) -> None:
+    """A cycle that ran out of usage used to record no lessons at all.
+
+    `injected_lesson_ids` was sent only with a finished build, so a cycle
+    handed a correction and then refused recorded nothing — and that field's
+    whole job is to tell "ignored the correction" from "never saw it" when the
+    same one arrives again. Every failed cycle lost exactly the evidence the
+    repeat diagnosis needs.
+
+    Asserted against the payload it travels in rather than against a run,
+    because the runner executes a whole cycle on import and cannot be called.
+    """
+    # Act: every payload that carries the field, with its own `status`.
+    carrying = [
+        _constants(node)
+        for node in ast.walk(runner)
+        if isinstance(node, ast.Dict)
+        and "injected_lesson_ids" in (_literal_keys(node) or set())
+    ]
+
+    # Assert: reported once, with the status that means the builder is about
+    # to start — the moment the fact becomes true, and the last one before a
+    # refusal can take it away.
+    assert len(carrying) == 1, (
+        "what a cycle was told should be reported exactly once, as soon as it "
+        f"is known; found {len(carrying)} payloads carrying it"
+    )
+    assert carrying[0].get("status") == "BUILDING"
+
+
+def _constants(node: ast.Dict) -> dict:
+    """The dict literal's string-keyed constant values."""
+    found = {}
+    for key, value in zip(node.keys, node.values, strict=False):
+        if isinstance(key, ast.Constant) and isinstance(value, ast.Constant):
+            found[key.value] = value.value
+    return found
+
+
 PROMPT_PATH = RUNNER_PATH.parent / "builder_prompt.md"
 
 REPORT_PATH = RUNNER_PATH.parent / "report.py"

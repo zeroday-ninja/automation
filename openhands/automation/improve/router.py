@@ -374,10 +374,18 @@ async def update_cycle(
         # share-of-work measurement can use.
         "runtime_switches",
         "claimed_change_class",
-        "injected_lesson_ids",
     ):
         if field in updates:
             setattr(cycle, field, updates[field])
+    if "injected_lesson_ids" in updates and body.injected_lesson_ids is not None:
+        # Rendered to strings, not assigned through. The field is typed
+        # `list[UUID]` and the column is JSON, so the plain `setattr` above
+        # raised `Object of type UUID is not JSON serializable` -- a 500 on
+        # the whole cycle update. It never fired because every cycle so far
+        # had no lesson in scope and sent `[]`, which serialises fine: a
+        # field that works only while it is empty, like the review record
+        # that rejected every reviewed cycle's final report.
+        cycle.injected_lesson_ids = [str(value) for value in body.injected_lesson_ids]
     if "checks" in updates and body.checks is not None:
         cycle.checks = [check.model_dump(mode="json") for check in body.checks]
     if "handoff" in updates and body.handoff is not None:
