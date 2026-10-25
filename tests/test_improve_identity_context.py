@@ -648,3 +648,44 @@ def test_a_repository_with_no_identity_is_asked_for_a_first_draft(preset) -> Non
     flat = " ".join(section.split())
     assert "has no PROJECT_IDENTITY.md" in flat
     assert "first draft" in flat
+
+
+def test_the_users_memory_is_named_apart_from_the_projects(preset) -> None:
+    """Two files called MEMORY.md, one of which must never be committed.
+
+    The builder is told to append a rejected approach to the repository's
+    `.openhands/identity/MEMORY.md` while the user's own MEMORY.md is quoted
+    in the same prompt. The user's heading said only "MEMORY.md", so the two
+    were indistinguishable by name — and the cost of that confusion is the
+    user's personal continuity log, which syncs across their machines, landing
+    in a repository. The plan's own decision table says session memory is "not
+    mirrored to a repository".
+    """
+    # Act
+    titles = dict(preset.IDENTITY_DOCUMENT_TITLES)
+    project_paths = {
+        relative for relative, _title, _budget in preset.PROJECT_IDENTITY_DOCUMENTS
+    }
+
+    # Assert: the user's memory names its own path, and no project document
+    # shares a *title* with it.
+    assert "~/.openhands/soul/MEMORY.md" in titles["memory"]
+    assert ".openhands/identity/MEMORY.md" in project_paths
+    for _name, title in preset.IDENTITY_DOCUMENT_TITLES:
+        assert ".openhands/identity/" not in title
+
+
+def test_the_builder_is_told_not_to_commit_the_users_memory(preset) -> None:
+    """Said in the prompt, because that is where the instruction that creates
+    the risk lives: "add a dated entry … to `.openhands/identity/MEMORY.md`".
+
+    A rule in a design document the model never reads is not a rule. This one
+    is checkable only as prose — the file is the agent's own to write, so
+    nothing downstream can tell a copied entry from an authored one.
+    """
+    import pathlib
+
+    prompt = (pathlib.Path(preset.__file__).parent / "builder_prompt.md").read_text()
+
+    assert "never goes into a repository" in prompt
+    assert "~/.openhands/soul/MEMORY.md" in prompt
