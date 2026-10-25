@@ -55,7 +55,7 @@ def local_day_bounds(
 
 def repository_identity(
     remote_id: uuid.UUID | None, label: str, url: str | None
-) -> tuple[str, str]:
+) -> str:
     """What counts as "the same repository" for the cap.
 
     The url, normalised, because it is the only thing every configuration of
@@ -72,13 +72,20 @@ def repository_identity(
     double allowance it is here to fix. A repository renamed at the forge does get a
     fresh allowance for one day; a redirect is indistinguishable from a move,
     and the alternative traded a real double allowance for a hypothetical one.
+
+    One string rather than a pair, and it carries which kind it is: a
+    repository known only by the label `hazard` and one whose url normalises
+    to `hazard` are not the same repository, and the prefix is what keeps
+    them apart. It is also what a lesson's subject is filed under and what
+    the claim hands the runner, so every reader of "the same repository"
+    quotes one value computed in one place.
     """
     normalised = normalise_repository_url(url)
     if normalised is not None:
-        return ("url", normalised)
+        return f"url:{normalised}"
     if remote_id is not None:
-        return ("remote", str(remote_id))
-    return ("label", label)
+        return f"remote:{remote_id}"
+    return f"label:{label}"
 
 
 async def cycles_today_by_repository(
@@ -86,7 +93,7 @@ async def cycles_today_by_repository(
     org_id: uuid.UUID,
     timezone_name: str | None,
     now: datetime | None = None,
-) -> Counter[tuple[str, str]]:
+) -> Counter[str]:
     """Today's cycles, counted per repository, across the whole org.
 
     Across the organization rather than per program: three programs each

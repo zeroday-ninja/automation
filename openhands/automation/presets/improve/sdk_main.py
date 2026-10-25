@@ -350,7 +350,7 @@ class LessonsUnavailable(Exception):
     """
 
 
-def fetch_lessons(repo_label: str, remote_id: str | None, runtime: str | None) -> tuple:
+def fetch_lessons(repo_identity: str, runtime: str | None) -> tuple:
     """The corrections this cycle works under, and their ids.
 
     The ids are reported back with the cycle, because they are the only thing
@@ -364,9 +364,12 @@ def fetch_lessons(repo_label: str, remote_id: str | None, runtime: str | None) -
     lessons = payload.get("lessons") if isinstance(payload, dict) else None
     if not isinstance(lessons, list):
         raise LessonsUnavailable("the lessons response carried no list")
-    scoped = lessons_in_scope(
-        lessons, repository=remote_id or repo_label, runtime=runtime
-    )
+    # The repository's identity as the service computes it, quoted rather
+    # than rebuilt here: a lesson's subject is filed under the same value, so
+    # a correction given about this repository is in scope whichever program
+    # is working on it. Building it from `remote_id or repo_label` is what
+    # made a correction invisible to a program configured the other way.
+    scoped = lessons_in_scope(lessons, repository=repo_identity, runtime=runtime)
     print(f"  corrections in force: {len(scoped)} of {len(lessons)}")
     repeated = [item for item in scoped if (item.get("repeats") or 0) > 0]
     if repeated:
@@ -1119,9 +1122,7 @@ def execute_cycle(workspace) -> None:
         # history: a correction rendered as "the user once said" invites a
         # judgement about whether it still applies, which is exactly the
         # judgement that produces a repeat.
-        lessons, lesson_ids = fetch_lessons(
-            repo_label, cycle.get("remote_id"), builder_runtime
-        )
+        lessons, lesson_ids = fetch_lessons(repository["identity"], builder_runtime)
         soul_section = lessons_section(lessons, LESSON_BUDGET_CHARS) + soul_section
 
         reviewers = choose_reviewers(config, profiles, builder_id)

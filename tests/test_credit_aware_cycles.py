@@ -243,6 +243,10 @@ def test_the_same_repository_written_four_ways_is_one_repository() -> None:
     assert len(same) == 1
     # And a different repository on the same host stays different.
     assert repository_identity(None, "a", "https://github.com/o/pairwatch") not in same
+    # A bare name is not a url. Normalising it to `hazard` would give it a
+    # url-shaped identity that no real repository can equal, which is the
+    # same silent mismatch one level down.
+    assert repository_identity(None, "HAZARD", "HAZARD") == "label:HAZARD"
 
 
 # --- the runtime ledger -----------------------------------------------------

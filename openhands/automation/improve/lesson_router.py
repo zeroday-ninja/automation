@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import AuthenticatedUser, require_permission
 from openhands.automation.db import get_session
+from openhands.automation.improve.caps import repository_identity
 from openhands.automation.improve.lessons import (
     LESSON_FAILURE_STAGES,
     LESSON_SCOPES,
@@ -248,10 +249,11 @@ async def capture_lesson(
     complaint.
     """
     existing = await _active(session, user.org_id)
+    subject = _canonical_subject(body.scope, body.subject)
     match = diagnose_repeat(
         body.text,
         scope=body.scope,
-        subject=body.subject,
+        subject=subject,
         existing=_as_dicts(existing),
         injected_lesson_ids=(
             [str(value) for value in body.injected_lesson_ids]
@@ -288,7 +290,7 @@ async def capture_lesson(
         id=uuid.uuid4(),
         org_id=user.org_id,
         scope=body.scope,
-        subject=body.subject,
+        subject=subject,
         trigger=body.trigger,
         text=body.text,
         why=body.why,
@@ -475,6 +477,19 @@ async def _load(
     return lesson
 
 
+def _canonical_subject(scope: str, subject: str | None) -> str | None:
+    """A project subject as the repository's identity, others unchanged.
+
+    The identity rather than the caller's spelling, so a correction given
+    about one repository is in scope for every program that works on it. Only
+    project scope: a runtime is named by its runtime name and a surface by
+    its own id, and neither is a repository.
+    """
+    if scope != "project" or subject is None:
+        return subject
+    return repository_identity(None, subject, subject)
+
+
 async def capture_resolution_as_lesson(
     session: AsyncSession,
     cycle: Any,
@@ -497,7 +512,13 @@ async def capture_resolution_as_lesson(
         return
     try:
         existing = await _active(session, user.org_id)
-        subject = cycle.remote_id and str(cycle.remote_id) or cycle.repo_label
+        # The repository's own identity, not whichever of its names this
+        # program happens to use: a correction filed under a Git Sync remote
+        # id was out of scope for a program that lists the same repository by
+        # hand, so it was never injected into that program's cycles and the
+        # person had to give it again. "Never say the same thing twice" was
+        # failing on a configuration difference.
+        subject = repository_identity(cycle.remote_id, cycle.repo_label, cycle.repo_url)
         match = diagnose_repeat(
             resolution,
             scope="project",

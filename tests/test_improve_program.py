@@ -1785,7 +1785,7 @@ class TestParkingAndResolving:
     #: park happens *after* the build, the review and the readiness check, so
     #: a fixture without this evidence is a cycle that could never have got
     #: there — and a person approving it still cannot conjure a passing test.
-    PUBLISHABLE = {
+    PUBLISHABLE: ClassVar[dict] = {
         "verdict": "ACCEPTED",
         "head_sha": "a1b2c3d4e5f6",
         "changed_files": ["server/socket.py"],
@@ -2337,6 +2337,89 @@ class TestCorrectionsBecomeLessons:
         )
         assert response.status_code == 200, response.text
         return cycle_id
+
+    async def test_one_repository_is_one_subject_however_it_was_named(
+        self, async_client
+    ):
+        """A correction about a repository is in scope for every program on it.
+
+        A project lesson was filed under whichever name the program that
+        captured it used — a Git Sync remote id for a synced rotation, a label
+        for a hand-listed one — so a correction given about a repository was
+        *out of scope* for another program working on the same repository. It
+        was never injected into that program's cycles, and the repeat was
+        diagnosed "filed against project/<other name>, so this work never had
+        it in scope": true, and wrong about the repository.
+
+        That is "never say the same thing twice" failing on a configuration
+        difference, which is the one thing the whole mechanism is for.
+        """
+        # Arrange / Act: the same repository, written two ways.
+        text = "Run the workspace package's build before trusting its typecheck."
+        first = await async_client.post(
+            self.LESSONS,
+            json={
+                "scope": "project",
+                "subject": "https://github.com/acme/shared.git",
+                "trigger": "change_requested",
+                "text": text,
+            },
+        )
+        again = await async_client.post(
+            self.LESSONS,
+            json={
+                "scope": "project",
+                "subject": "https://github.com/acme/shared",
+                "trigger": "chat_instruction",
+                "text": text,
+            },
+        )
+
+        # Assert: one lesson, and the second telling is a repeat with a
+        # diagnosis — not a second lesson filed beside the first.
+        assert first.status_code == 201, first.text
+        assert first.json()["repeat"] is False
+        assert again.json()["repeat"] is True
+        assert again.json()["lesson"]["id"] == first.json()["lesson"]["id"]
+        assert again.json()["failed_stage"] == "not_injected"
+
+        listed = await async_client.get(self.LESSONS)
+        subjects = [
+            lesson["subject"]
+            for lesson in listed.json()["lessons"]
+            if lesson["scope"] == "project"
+        ]
+        assert subjects == ["url:github.com/acme/shared"]
+
+    async def test_a_cycle_is_told_the_repositorys_identity_to_match_on(
+        self, async_client
+    ):
+        """The other half: the runner filters corrections by this value.
+
+        It used to build its own from `remote_id or repo_label`, which is the
+        same repository under two different names depending on how its
+        program was configured. The service computes it once and the claim
+        carries it, so quoting it is all the runner has to do.
+        """
+        # Arrange: one repository reached through a Git Sync remote, and the
+        # same one listed by hand in another program.
+        url = "https://github.com/acme/joined"
+        await add_remote(async_client, url + ".git", "joined")
+        synced = await create_program(async_client)
+        listed = await create_program(
+            async_client,
+            repository_source="explicit",
+            repositories=[{"label": "joined", "url": url, "ref": "main"}],
+        )
+
+        # Act
+        from_synced = await claim(async_client, synced["id"])
+        from_listed = await claim(async_client, listed["id"])
+
+        # Assert: the same identity, and the one a lesson is filed under.
+        identity = from_synced.json()["cycle"]["repository"]["identity"]
+        assert identity == "url:github.com/acme/joined"
+        assert from_listed.json()["cycle"]["repository"]["identity"] == identity
 
     async def test_what_a_cycle_was_told_survives_the_failure_that_follows(
         self, async_client
