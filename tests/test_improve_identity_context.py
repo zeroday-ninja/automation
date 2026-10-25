@@ -736,3 +736,70 @@ def test_nothing_is_committed_when_the_runtime_wrote_no_prose(preset, tmp_path) 
     work = _repo_with_a_remote(tmp_path)
 
     assert preset.commit_handoff_prose(str(work), "improve/x", "   \n") is False
+
+
+def test_the_prose_lands_on_the_named_branch_whatever_head_says(
+    preset, tmp_path
+) -> None:
+    """The branch it says it wrote to is the branch it wrote to.
+
+    `git commit` writes to HEAD; the push that follows names the branch. When
+    those two disagree the prose was committed to whichever branch the builder
+    happened to leave checked out, the push of the named branch reported
+    success because that branch was already up to date, and the cycle printed
+    "the handoff's own words are on <branch>" — so the last tokens of an
+    exhausted runtime bought prose on a ref nothing ever fetches, and said
+    they had not.
+
+    `save_work_in_progress` reaches this on its own: when the builder leaves
+    HEAD elsewhere and the branch already exists it deliberately does not move
+    HEAD, and the next thing the handoff does is commit.
+
+    Observed on a live QA cycle on 2026-10-25: the prose commit landed on the
+    builder's own branch while the cycle recorded it on `improve/qa-handoff…`.
+    """
+    # Arrange: the branch carries the work, and HEAD is somewhere else.
+    import subprocess
+
+    work = _repo_with_a_remote(tmp_path)
+    git = ["git", "-C", str(work)]
+    subprocess.run([*git, "checkout", "-q", "-b", "improve/20261025-1706"], check=True)
+    (work / "half-done.py").write_text("def started():\n    return 1\n")
+    subprocess.run([*git, "add", "half-done.py"], check=True)
+    subprocess.run([*git, "commit", "-qm", "wip: the actual work"], check=True)
+    subprocess.run([*git, "push", "-q", "origin", "improve/20261025-1706"], check=True)
+    subprocess.run([*git, "checkout", "-q", "-b", "builders-own-branch"], check=True)
+
+    # Act
+    carried = preset.commit_handoff_prose(
+        str(work),
+        "improve/20261025-1706",
+        "Tried the single-writer lock; it deadlocks under two writers.",
+    )
+
+    # Assert: on the named branch, on the remote, and not on HEAD's.
+    assert carried is True
+    remote_log = subprocess.run(
+        [*git, "log", "-1", "--pretty=%B", "origin/improve/20261025-1706"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "deadlocks under two writers" in remote_log
+    elsewhere = subprocess.run(
+        [*git, "log", "-1", "--pretty=%B", "builders-own-branch"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "deadlocks" not in elsewhere
+    # And the builder's work is still the parent of it, not replaced by it.
+    assert (
+        "the actual work"
+        in subprocess.run(
+            [*git, "log", "-2", "--pretty=%B", "origin/improve/20261025-1706"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    )
