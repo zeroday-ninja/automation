@@ -879,12 +879,24 @@ async def get_builder_share(
     rotate three and quietly using two would otherwise read as a perfect
     split, which is the exact failure the rotation exists to fix, scored as a
     pass.
+
+    Unscoped there is no configuration to read, and measuring against only
+    the runtimes that appear had the same hole with nothing to close it: one
+    runtime building every cycle was a single share of 100% against an even
+    share of 100% -- a gap of zero and `within_target: true`. "claude-code
+    built 31 of 33", which is why this measure exists, read as perfect. The
+    org's ledger rows are the honest list instead: a runtime that has been
+    seen at all and then built nothing this week widens the gap by its own
+    absence.
     """
     window = max(1, min(days, 365))
     expected: int | None = None
     if automation_id is not None:
         _, config = await _load_program(session, automation_id, user)
         expected = len({config.builder_profile_id, *config.rotate_builder})
+    else:
+        known = await observed_runtimes(session, user.org_id)
+        expected = len(known) or None
     shares, since, covered, unattributed = await builder_share(
         session, user.org_id, days=window, automation_id=automation_id
     )

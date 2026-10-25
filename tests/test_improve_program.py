@@ -19,6 +19,10 @@ from openhands.automation.app import app
 from openhands.automation.auth import authenticate_request
 from openhands.automation.config import clear_config_cache
 from openhands.automation.improve.rotation import next_builder
+from openhands.automation.improve.usage import (
+    RuntimeObservation,
+    record_observations,
+)
 from openhands.automation.models import (
     Automation,
     AutomationImproveCycle,
@@ -347,6 +351,56 @@ class TestTheBuilderShare:
         async_session.add(cycle)
         await async_session.flush()
         return cycle
+
+    async def test_one_runtime_doing_everything_is_never_an_even_split(
+        self, async_client, async_session
+    ):
+        """The plan's own headline failure, scored as a pass.
+
+        Scoped to a program, "even" is measured against the runtimes it is
+        configured to rotate. Unscoped it was measured against the runtimes
+        that *appear* — so one runtime building every cycle gave a single
+        share of 100% against an even share of 100%, a gap of zero, and
+        `within_target: true`. That is "claude-code built 31 of 33", which is
+        why this measure exists, reading as perfect.
+
+        Measured instead against the runtimes the org has a ledger row for:
+        a runtime that went silent for the week widens the gap by its own
+        absence, which is what the scoped reading already does with a
+        program's configuration.
+        """
+        # Arrange: three runtimes known to the ledger, one doing all the work.
+        await record_observations(
+            async_session,
+            ORG_ID,
+            [
+                RuntimeObservation(
+                    runtime=runtime,
+                    outcome="ok",
+                    observed_at=datetime.now(UTC) - timedelta(days=8),
+                )
+                for runtime in ("claude-code", "codex", "antigravity")
+            ],
+        )
+        await add_remote(async_client, "https://github.com/acme/solo", "solo")
+        program = await create_program(async_client)
+        for day in range(7):
+            await self._cycle_built_by(
+                async_session, program["id"], "claude-code", days_ago=day + 0.5
+            )
+        await async_session.commit()
+
+        # Act
+        response = await async_client.get(
+            "/api/automation/v1/improve/builder-share?days=7"
+        )
+
+        # Assert
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["days_covered"] == 7
+        assert body["evenness_gap"] > 20.0
+        assert body["within_target"] is False
 
     async def test_a_cycle_that_names_no_runtime_is_not_counted_as_one(
         self, async_client, async_session
