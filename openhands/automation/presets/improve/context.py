@@ -533,17 +533,25 @@ def commit_handoff_prose(repo_path: str, branch: str, prose: str) -> bool:
     — that order is the plan's ("the code is worth more than the description
     of it, so it is secured first") and amending would mean force-pushing a
     branch another cycle may already have fetched.
+
+    Written onto the branch directly rather than through a checkout, because
+    `git commit` writes to HEAD and the push that follows names the branch.
+    When those two disagreed the prose went onto whatever the builder had left
+    checked out, the push reported success because the named branch was
+    already up to date, and this said the words were on a branch they were not
+    on. `save_work_in_progress` reaches that state by design: a builder that
+    leaves HEAD elsewhere on an existing branch is told so and HEAD is left
+    where it is. Plumbing also leaves the builder's tree and HEAD alone, which
+    a checkout in a dying sandbox cannot promise.
     """
     text = (prose or "").strip()
     if not text:
         return False
     if len(text) > MAX_HANDOFF_PROSE:
         text = text[:MAX_HANDOFF_PROSE] + "\n\n[truncated]"
-    message = f"wip: handing off {branch}\n\n{text}"
-    for args, timeout in (
-        (["commit", "--allow-empty", "--no-verify", "-m", message], 180),
-        (["push", "origin", branch], 300),
-    ):
+
+    def git(*args: str, timeout: int = 180) -> str | None:
+        """The command's output, or None having said why not."""
         try:
             result = subprocess.run(
                 ["git", "-C", repo_path, *args],
@@ -554,11 +562,32 @@ def commit_handoff_prose(repo_path: str, branch: str, prose: str) -> bool:
             )
         except (OSError, subprocess.SubprocessError) as exc:
             print(f"  could not put the handoff prose on {branch}: {exc}")
-            return False
+            return None
         if result.returncode != 0:
-            detail = result.stderr.strip()[:200]
+            detail = result.stderr.strip()[:200] or f"git {args[0]} failed"
             print(f"  could not put the handoff prose on {branch}: {detail}")
-            return False
+            return None
+        return result.stdout.strip()
+
+    ref = f"refs/heads/{branch}"
+    tip = git("rev-parse", "--verify", ref)
+    if not tip:
+        return False
+    tree = git("rev-parse", "--verify", f"{tip}^{{tree}}")
+    if not tree:
+        return False
+    message = f"wip: handing off {branch}\n\n{text}"
+    # Same tree as the tip: the prose is a message, and the code it describes
+    # is already on the branch under its own commit.
+    made = git("commit-tree", tree, "-p", tip, "-m", message)
+    if not made:
+        return False
+    # `tip` as the expected old value: another writer having moved the branch
+    # in between is a reason to stop rather than to overwrite them.
+    if git("update-ref", ref, made, tip) is None:
+        return False
+    if git("push", "origin", branch, timeout=300) is None:
+        return False
     print(f"  the handoff's own words are on {branch}")
     return True
 
