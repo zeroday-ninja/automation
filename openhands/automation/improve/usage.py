@@ -27,9 +27,11 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from openhands.automation.improve.caps import local_day_bounds
 from openhands.automation.models import (
     AutomationImproveCycle,
     AutomationRuntimeUsage,
+    ImproveCycleStatus,
     RuntimeUsageState,
 )
 
@@ -146,15 +148,60 @@ def _rolled_over(row: AutomationRuntimeUsage, now: datetime) -> bool:
     return started.date() != now.date()
 
 
+async def cycles_today_by_runtime(
+    session: AsyncSession,
+    org_id: uuid.UUID,
+    *,
+    timezone_name: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, tuple[int, int]]:
+    """How many cycles each runtime attempted today, and how many it finished.
+
+    Derived rather than stored, for the reason recovery is: the ledger's own
+    ``cycles_attempted`` and ``cycles_completed`` columns were incremented by
+    a writer no production path ever called, and ``cycles_completed`` had no
+    writer at all -- so "cycles today" read 0/0 for every runtime, always, on
+    the one surface a person asks it from.
+
+    The cycle table already knows. One owner, and a restart cannot drop a
+    transition in it. The two columns are left in place: dropping them is a
+    migration that discards data, which is a decision for a person.
+    """
+    start, _ = local_day_bounds(timezone_name, now)
+    rows = (
+        await session.execute(
+            select(
+                AutomationImproveCycle.builder_runtime,
+                AutomationImproveCycle.status,
+            ).where(
+                AutomationImproveCycle.org_id == org_id,
+                AutomationImproveCycle.created_at >= start,
+                AutomationImproveCycle.builder_runtime.is_not(None),
+            )
+        )
+    ).all()
+    counts: dict[str, list[int]] = {}
+    for runtime, status in rows:
+        tally = counts.setdefault(runtime, [0, 0])
+        tally[0] += 1
+        if status == ImproveCycleStatus.COMPLETED:
+            tally[1] += 1
+    return {runtime: (tally[0], tally[1]) for runtime, tally in counts.items()}
+
+
 async def runtime_statuses(
     session: AsyncSession,
     org_id: uuid.UUID,
     runtimes: Sequence[str],
     *,
+    timezone_name: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, RuntimeStatus]:
     """Each runtime as it stands, with recovery applied at read time."""
     moment = now or datetime.now(UTC)
+    today = await cycles_today_by_runtime(
+        session, org_id, timezone_name=timezone_name, now=moment
+    )
     rows = {
         row.runtime: row
         for row in (
@@ -175,13 +222,14 @@ async def runtime_statuses(
         if row is None:
             # Never observed. Selectable — something has to go first — but
             # recorded as unknown rather than dressed up as healthy.
+            attempted, completed = today.get(runtime, (0, 0))
             statuses[runtime] = RuntimeStatus(
                 runtime=runtime,
                 state=RuntimeUsageState.UNKNOWN,
                 available=True,
                 reset_at=None,
-                cycles_attempted=0,
-                cycles_completed=0,
+                cycles_attempted=attempted,
+                cycles_completed=completed,
             )
             continue
 
@@ -191,8 +239,7 @@ async def runtime_statuses(
         if state is RuntimeUsageState.EXHAUSTED and recovered:
             state = RuntimeUsageState.AVAILABLE
             reset_at = None
-        attempted = 0 if _rolled_over(row, moment) else row.cycles_attempted
-        completed = 0 if _rolled_over(row, moment) else row.cycles_completed
+        attempted, completed = today.get(runtime, (0, 0))
         statuses[runtime] = RuntimeStatus(
             runtime=runtime,
             state=state,
@@ -202,23 +249,6 @@ async def runtime_statuses(
             cycles_completed=completed,
         )
     return statuses
-
-
-async def note_attempt(session: AsyncSession, org_id: uuid.UUID, runtime: str) -> None:
-    """Count a cycle this runtime is about to build.
-
-    Counted before the work rather than after, because the point of the count
-    is to spread work across subscriptions, and a runtime that attempted and
-    failed has still spent something.
-    """
-    row = await _row(session, org_id, runtime)
-    now = datetime.now(UTC)
-    if _rolled_over(row, now):
-        row.window_started_at = now
-        row.cycles_attempted = 0
-        row.cycles_completed = 0
-    row.cycles_attempted += 1
-    row.updated_at = now
 
 
 def choose_by_headroom(
@@ -250,6 +280,22 @@ def earliest_reset(statuses: dict[str, RuntimeStatus]) -> datetime | None:
     return min(times) if times else None
 
 
+#: Values `builder_runtime` carries that name no runtime at all.
+#:
+#: The preset resolves a profile's runtime from its ACP server, so a profile
+#: with a custom launch command records the literal ``"custom"``, and one
+#: whose detail lookup failed falls back to its kind, ``"acp"``. Neither
+#: identifies anything: several different real runtimes land under the same
+#: word.
+#:
+#: They are kept out of the share rather than counted as runtimes. A
+#: share-*of-runtimes* that includes them reports "a runtime called custom did
+#: 3% of the work", and -- worse -- widens the denominator for "even", so the
+#: measure moves because of how a profile was configured rather than because
+#: of who did the building.
+UNIDENTIFIED_RUNTIMES: frozenset[str] = frozenset({"custom", "acp"})
+
+
 async def observed_runtimes(session: AsyncSession, org_id: uuid.UUID) -> list[str]:
     """Every runtime this org has a ledger row for.
 
@@ -257,9 +303,16 @@ async def observed_runtimes(session: AsyncSession, org_id: uuid.UUID) -> list[st
     runtimes — the ones a program is configured to use — and a reader asking
     "what is spent" has no such list. A runtime nobody has observed has
     nothing to report, so this is the honest set to answer about.
+
+    ``custom`` and ``acp`` are left out for the same reason they are left out
+    of the share: they are not runtimes, they are what a lookup says when it
+    could not tell. Listing one as "available" offers a reader something they
+    cannot select, and several different real runtimes land under the one
+    word.
     """
     return sorted(
-        (
+        runtime
+        for runtime in (
             await session.execute(
                 select(AutomationRuntimeUsage.runtime).where(
                     AutomationRuntimeUsage.org_id == org_id
@@ -268,6 +321,7 @@ async def observed_runtimes(session: AsyncSession, org_id: uuid.UUID) -> list[st
         )
         .scalars()
         .all()
+        if runtime not in UNIDENTIFIED_RUNTIMES
     )
 
 
@@ -301,22 +355,6 @@ async def last_observation_of(
         }
         for row in rows
     }
-
-
-#: Values `builder_runtime` carries that name no runtime at all.
-#:
-#: The preset resolves a profile's runtime from its ACP server, so a profile
-#: with a custom launch command records the literal ``"custom"``, and one
-#: whose detail lookup failed falls back to its kind, ``"acp"``. Neither
-#: identifies anything: several different real runtimes land under the same
-#: word.
-#:
-#: They are kept out of the share rather than counted as runtimes. A
-#: share-*of-runtimes* that includes them reports "a runtime called custom did
-#: 3% of the work", and -- worse -- widens the denominator for "even", so the
-#: measure moves because of how a profile was configured rather than because
-#: of who did the building.
-UNIDENTIFIED_RUNTIMES: frozenset[str] = frozenset({"custom", "acp"})
 
 
 @dataclass(frozen=True, slots=True)
