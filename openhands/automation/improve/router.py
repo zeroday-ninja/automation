@@ -360,6 +360,7 @@ async def update_cycle(
         # and an authorised merge can still fail.
         "merged_at",
         "merge_commit_sha",
+        "identity_cost",
         "changed_files",
         "followups",
         "risks",

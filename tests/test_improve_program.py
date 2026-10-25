@@ -369,6 +369,62 @@ class TestTheBuilderShare:
         assert body["within_target"] is None
 
 
+class TestWhatIdentityCostTheCycle:
+    """The budget was enforced and never recorded, so nobody could read it.
+
+    Milestone 2's measure is that identity never exceeds its share of the
+    cycle's context budget, *measured per cycle*. Enforcement alone cannot
+    answer it, and cannot show the user which of their documents is about to
+    be the one that gets cut.
+    """
+
+    async def test_the_cycle_records_what_identity_took(self, async_client):
+        # Arrange
+        await add_remote(async_client, "https://github.com/acme/alpha", "alpha")
+        program = await create_program(async_client)
+        cycle_id = (await claim(async_client, program["id"])).json()["cycle"]["id"]
+
+        # Act: the shape the runner sends with its builder stage.
+        response = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "status": "REVIEWING",
+                "identity_cost": {
+                    "budget": 24000,
+                    "used": 9100,
+                    "share": 0.379,
+                    "documents": {"soul": 8000, "style": 1100},
+                    "trimmed": ["soul"],
+                    "omitted": [],
+                },
+            },
+        )
+
+        # Assert: readable, including the document that did not fit whole —
+        # which is the part a person can act on.
+        assert response.status_code == 200, response.text
+        cost = response.json()["identity_cost"]
+        assert cost["share"] == 0.379
+        assert cost["trimmed"] == ["soul"]
+
+    async def test_a_cycle_that_reported_none_says_nothing_rather_than_zero(
+        self, async_client
+    ):
+        # A runner from before this existed sends no cost. Reporting zero
+        # would read as "identity took none of the prompt", which is a claim
+        # about a cycle nobody measured.
+        await add_remote(async_client, "https://github.com/acme/beta", "beta")
+        program = await create_program(async_client)
+        cycle_id = (await claim(async_client, program["id"])).json()["cycle"]["id"]
+
+        response = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={"status": "REVIEWING"},
+        )
+
+        assert response.json()["identity_cost"] is None
+
+
 class TestFollowingAMergedChangeBack:
     """The audit trail's own measure, which nothing could read.
 

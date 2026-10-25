@@ -121,6 +121,50 @@ def read_project_identity(repo_path: str) -> dict:
     return found
 
 
+def identity_cost(documents: dict, budget: int = IDENTITY_BUDGET_CHARS) -> dict:
+    """What the user's identity actually took of the cycle's prompt.
+
+    The budget was enforced from the start and never measured, so the one
+    question the milestone asks — does identity crowd out the repository the
+    cycle is supposed to improve — could not be answered, and the failure that
+    matters was invisible: a SOUL.md that has grown past its slot is trimmed
+    silently, and the user who wrote the part that got cut has no way to know.
+
+    Counted the same way the sections are built, in the same load order, so
+    this is what was spent rather than an estimate of it.
+    """
+    spent = 0
+    per_document: dict[str, int] = {}
+    trimmed: list[str] = []
+    omitted: list[str] = []
+    for name, _title in IDENTITY_DOCUMENT_TITLES:
+        text = documents.get(name)
+        if not text:
+            continue
+        room = budget - spent
+        if room <= 0:
+            omitted.append(name)
+            continue
+        kept = trim_to_budget(text, room, keep_end=name == "memory")
+        if len(kept) < len(text):
+            trimmed.append(name)
+        per_document[name] = len(kept)
+        spent += len(kept)
+    return {
+        "budget": budget,
+        "used": spent,
+        # Rounded to the nearest point: the question is "is identity taking
+        # most of the prompt", and four decimal places answer a question
+        # nobody asked.
+        "share": round(spent / budget, 3) if budget else None,
+        "documents": per_document,
+        #: Documents that did not fit whole. This is the one a person acts on.
+        "trimmed": trimmed,
+        #: Documents the budget never reached at all.
+        "omitted": omitted,
+    }
+
+
 def identity_sections(documents: dict, note: str | None) -> str:
     """The user's identity, in load order, inside the character budget.
 

@@ -142,6 +142,7 @@ from lessons import lessons_in_scope, lessons_section  # noqa: E402
 from routing import GateDecision, route_for  # noqa: E402
 from context import (  # noqa: E402
     fetch_identity_set,
+    identity_cost,
     looks_exhausted,
     lost_phase_summary,
     phase_failure_notice,
@@ -893,6 +894,16 @@ def execute_cycle(workspace) -> None:
             print(f"  WARNING: {identity_note}")
 
         soul_section = identity_sections(identity_documents, identity_note)
+        spent = identity_cost(identity_documents)
+        if spent["trimmed"] or spent["omitted"]:
+            # Said out loud, because the person whose document was cut is not
+            # reading the prompt. The record carries it too; this is for
+            # whoever is watching the run.
+            print(
+                f"  WARNING: the identity budget was not enough — trimmed "
+                f"{spent['trimmed'] or 'nothing'}, omitted "
+                f"{spent['omitted'] or 'nothing'}"
+            )
         identity_section = project_identity_sections(project_documents, repo_label)
         focus = clamp(config.get("focus"), 4000)
         focus_section = (
@@ -1167,6 +1178,7 @@ def execute_cycle(workspace) -> None:
             builder_update["soul_suggestions"] = soul_suggestions
         if pr_url:
             builder_update["pr_url"] = pr_url
+        builder_update["identity_cost"] = spent
         report_cycle(builder_update)
         print(f"  status: {builder_status or 'unreported'}")
         print(f"  sources cited: {len(sources)}")

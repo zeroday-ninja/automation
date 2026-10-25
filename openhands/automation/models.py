@@ -1324,6 +1324,11 @@ class AutomationImproveCycle(Base):
         DateTime(timezone=True), nullable=True
     )
     merge_commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # What the user's identity took of this cycle's prompt, and which of its
+    # documents did not fit whole. The budget was always enforced; this is the
+    # first thing that can say whether it was nearly spent, and which document
+    # the user should shorten before it is the one being cut.
+    identity_cost: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     # Files the builder says it changed, the checks it ran with their
     # results, what it deliberately did not do, and the weakest part of its

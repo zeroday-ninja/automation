@@ -213,6 +213,13 @@ class UpdateCycleRequest(BaseModel):
         ),
     )
     merge_commit_sha: str | None = Field(default=None, max_length=64)
+    identity_cost: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "What the user's identity took of this cycle's prompt: the "
+            "budget, what was spent, and which documents did not fit whole."
+        ),
+    )
     changed_files: list[str] | None = Field(default=None, max_length=200)
     checks: list[CycleCheck] | None = Field(default=None, max_length=MAX_CHECKS)
     followups: list[str] | None = Field(default=None, max_length=40)
@@ -658,6 +665,7 @@ class CycleResponse(BaseModel):
     head_sha: str | None
     merged_at: UtcDatetime | None
     merge_commit_sha: str | None
+    identity_cost: dict[str, Any] | None = None
     changed_files: list[str]
     checks: list[dict[str, Any]]
     followups: list[str]
@@ -717,6 +725,7 @@ class CycleResponse(BaseModel):
             head_sha=cycle.head_sha,
             merged_at=cycle.merged_at,
             merge_commit_sha=cycle.merge_commit_sha,
+            identity_cost=cycle.identity_cost,
             changed_files=cycle.changed_files or [],
             checks=cycle.checks or [],
             followups=cycle.followups or [],
