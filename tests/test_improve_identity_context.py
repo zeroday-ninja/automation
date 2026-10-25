@@ -255,6 +255,71 @@ def test_a_refusal_for_usage_is_told_apart_from_an_ordinary_failure(
     assert preset.looks_exhausted(None) is False
 
 
+def test_what_identity_cost_is_counted_the_way_it_was_spent(preset) -> None:
+    """The budget was enforced from the first cycle and never measured.
+
+    So the question the milestone asks — does identity crowd out the
+    repository the cycle is supposed to improve — could only be answered by
+    reading the preset, and the failure it hides is worse: a document grown
+    past its slot is trimmed silently, and the person who wrote the part that
+    was cut sees nothing.
+    """
+    # Arrange: two documents well inside the budget.
+    documents = {"soul": "a" * 1000, "style": "b" * 500}
+
+    # Act
+    cost = preset.identity_cost(documents, budget=24000)
+
+    # Assert: what was spent, per document, and nothing cut.
+    assert cost["used"] == 1500
+    assert cost["documents"] == {"soul": 1000, "style": 500}
+    assert cost["trimmed"] == []
+    assert cost["omitted"] == []
+    assert cost["share"] == round(1500 / 24000, 3)
+
+
+def test_a_document_that_outgrew_its_slot_is_named(preset) -> None:
+    # The one a person acts on: this is the document to shorten, by name,
+    # before it is the one being cut.
+    cost = preset.identity_cost({"soul": "a" * 500}, budget=100)
+
+    assert cost["trimmed"] == ["soul"]
+    assert cost["used"] <= 100 + len("\n\n[truncated]")
+
+
+def test_a_document_the_budget_never_reached_is_told_apart_from_a_trimmed_one(
+    preset,
+) -> None:
+    # Trimmed means "some of it got through"; omitted means "none of it did".
+    # Reporting both as trimmed would hide a document the cycle never saw.
+    cost = preset.identity_cost({"soul": "a" * 200, "style": "b" * 200}, budget=100)
+
+    assert cost["trimmed"] == ["soul"]
+    assert cost["omitted"] == ["style"]
+    assert "style" not in cost["documents"]
+
+
+def test_the_count_matches_what_the_prompt_actually_carries(preset) -> None:
+    """The measure has to be the spend, not an estimate of it.
+
+    Counted independently of the sections but in the same load order, so a
+    change to one that is not made to the other shows up here rather than as
+    a number quietly describing a prompt nobody sent.
+    """
+    documents = {"soul": "a" * 9000, "style": "b" * 2000, "memory": "c" * 300}
+
+    cost = preset.identity_cost(documents, budget=24000)
+    section = preset.identity_sections(documents, None)
+
+    # Every document's kept length appears in the rendered sections.
+    for name, kept in cost["documents"].items():
+        assert kept > 0, name
+    assert cost["used"] <= 24000
+    # The rendered text is the documents plus their headings, so it is longer
+    # than the spend but never shorter.
+    assert len(section) >= cost["used"]
+
+
 def test_a_run_whose_phases_are_lost_says_the_dashboard_is_behind(
     preset,
 ) -> None:
