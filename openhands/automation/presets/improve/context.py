@@ -73,6 +73,16 @@ IDENTITY_DOCUMENT_TITLES = [
     ("influences", "What shaped their thinking (data/influences.md)"),
 ]
 
+#: What the repository's whole identity set may take of a cycle's prompt.
+#:
+#: Below the user's 24000 deliberately: the repository's identity must never
+#: take more of the prompt than the person it is being worked for. The four
+#: documents' own budgets sum to 22000, so without an aggregate the project
+#: half could nearly match the user half -- and unlike the user half it was
+#: neither capped in total nor measured, which is the same blind spot
+#: `identity_cost` was written to close on the other side.
+PROJECT_IDENTITY_BUDGET_CHARS = 16000
+
 #: The project's own identity set, read from the repository being improved.
 PROJECT_IDENTITY_DOCUMENTS = [
     ("PROJECT_IDENTITY.md", "What this project is for (PROJECT_IDENTITY.md)", 8000),
@@ -121,23 +131,17 @@ def read_project_identity(repo_path: str) -> dict:
     return found
 
 
-def identity_cost(documents: dict, budget: int = IDENTITY_BUDGET_CHARS) -> dict:
-    """What the user's identity actually took of the cycle's prompt.
+def _cost_of(documents: dict, order: list, budget: int, tail: str) -> dict:
+    """What one identity set took, counted the way its sections are built.
 
-    The budget was enforced from the start and never measured, so the one
-    question the milestone asks — does identity crowd out the repository the
-    cycle is supposed to improve — could not be answered, and the failure that
-    matters was invisible: a SOUL.md that has grown past its slot is trimmed
-    silently, and the user who wrote the part that got cut has no way to know.
-
-    Counted the same way the sections are built, in the same load order, so
-    this is what was spent rather than an estimate of it.
+    `order` is the load order, `tail` the document kept from the end rather
+    than the start -- a log wants its most recent entries.
     """
     spent = 0
     per_document: dict[str, int] = {}
     trimmed: list[str] = []
     omitted: list[str] = []
-    for name, _title in IDENTITY_DOCUMENT_TITLES:
+    for name in order:
         text = documents.get(name)
         if not text:
             continue
@@ -145,7 +149,7 @@ def identity_cost(documents: dict, budget: int = IDENTITY_BUDGET_CHARS) -> dict:
         if room <= 0:
             omitted.append(name)
             continue
-        kept = trim_to_budget(text, room, keep_end=name == "memory")
+        kept = trim_to_budget(text, room, keep_end=name == tail)
         if len(kept) < len(text):
             trimmed.append(name)
         per_document[name] = len(kept)
@@ -162,6 +166,58 @@ def identity_cost(documents: dict, budget: int = IDENTITY_BUDGET_CHARS) -> dict:
         "trimmed": trimmed,
         #: Documents the budget never reached at all.
         "omitted": omitted,
+    }
+
+
+def identity_cost(
+    documents: dict,
+    budget: int = IDENTITY_BUDGET_CHARS,
+    project: dict | None = None,
+) -> dict:
+    """What identity actually took of the cycle's prompt.
+
+    The budget was enforced from the start and never measured, so the one
+    question the milestone asks — does identity crowd out the repository the
+    cycle is supposed to improve — could not be answered, and the failure that
+    matters was invisible: a SOUL.md that has grown past its slot is trimmed
+    silently, and the user who wrote the part that got cut has no way to know.
+
+    That was half the answer. The *repository's* identity set is read and
+    injected on every cycle too, and it was neither capped in total nor
+    recorded anywhere but the run log — up to 22000 characters of a cycle's
+    prompt that no record could account for, so "a cycle on a repository with
+    a full identity set demonstrably uses it" could not be demonstrated and
+    "identity never exceeds its share" was measured against one half of
+    identity. Both sets are counted here now, and `total` is the number the
+    metric actually asks for.
+    """
+    user = _cost_of(
+        documents,
+        [name for name, _title in IDENTITY_DOCUMENT_TITLES],
+        budget,
+        "memory",
+    )
+    if project is None:
+        return user
+    repository = _cost_of(
+        project,
+        [relative for relative, _title, _budget in PROJECT_IDENTITY_DOCUMENTS],
+        PROJECT_IDENTITY_BUDGET_CHARS,
+        ".openhands/identity/MEMORY.md",
+    )
+    both = budget + PROJECT_IDENTITY_BUDGET_CHARS
+    spent = user["used"] + repository["used"]
+    return {
+        **user,
+        #: The repository's own identity, counted the same way.
+        "project": repository,
+        #: The two together, which is what "identity's share of the prompt"
+        #: means. Reading either half alone understates it by the other.
+        "total": {
+            "budget": both,
+            "used": spent,
+            "share": round(spent / both, 3) if both else None,
+        },
     }
 
 
@@ -202,12 +258,28 @@ def identity_sections(documents: dict, note: str | None) -> str:
 
 
 def project_identity_sections(documents: dict, repo_label: str) -> str:
-    """The repository's identity, or an instruction to draft the missing one."""
+    """The repository's identity, or an instruction to draft the missing one.
+
+    Inside an aggregate budget, like the user's and for the same reason: four
+    documents each inside its own slot can still add up to most of a prompt,
+    and this one said so in the run log and nowhere a reader would find it.
+    """
     blocks: list[str] = []
+    spent = 0
     for relative, title, _budget in PROJECT_IDENTITY_DOCUMENTS:
         text = documents.get(relative)
-        if text:
-            blocks.append(f"## {title}\n\n{text}\n")
+        if not text:
+            continue
+        room = PROJECT_IDENTITY_BUDGET_CHARS - spent
+        if room <= 0:
+            blocks.append(
+                f"## {title}\n\n[omitted: this project's identity budget was "
+                "already spent on the documents above]\n"
+            )
+            continue
+        kept = trim_to_budget(text, room, keep_end=relative.endswith("MEMORY.md"))
+        spent += len(kept)
+        blocks.append(f"## {title}\n\n{kept}\n")
     if blocks:
         return "\n".join(blocks)
     return (
