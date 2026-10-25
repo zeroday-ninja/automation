@@ -70,6 +70,7 @@ from openhands.automation.improve.usage import (
     observed_runtimes,
     provenance_of_merged_cycles,
     record_observations,
+    rotation_faults,
     runtime_statuses,
 )
 from openhands.automation.models import (
@@ -721,6 +722,14 @@ async def get_builder_share(
     actually ran rather than the one the profile named, because a cycle that
     failed over mid-change belongs to whichever runtime finished it.
 
+    The plan's measure for this milestone has three parts and only one of
+    them is a percentage: the share, **zero cycles that redo work a prior
+    incomplete handoff already covered**, and **the recorded builder runtime
+    matching the runtime that actually ran**. The other two are counts of a
+    specific wrong thing, and both were fixed without anything being able to
+    say they stayed fixed — so they are counted here, beside the share they
+    belong to.
+
     ``days_covered`` travels with the answer. A week asked of two days of
     history is "not yet", not a result, and `within_target` is null rather
     than false while that is true: an unmet measure and an unmeasurable one
@@ -746,6 +755,9 @@ async def get_builder_share(
     shares, since, covered = await builder_share(
         session, user.org_id, days=window, automation_id=automation_id
     )
+    faults = await rotation_faults(
+        session, user.org_id, days=window, automation_id=automation_id
+    )
     gap = evenness_gap(shares, expected_runtimes=expected)
     within = None
     if covered >= window and gap is not None:
@@ -767,6 +779,9 @@ async def get_builder_share(
         ],
         evenness_gap=gap,
         within_target=within,
+        misattributed_cycles=faults.misattributed,
+        work_redone=faults.redone,
+        handoffs_waiting=faults.waiting,
     )
 
 

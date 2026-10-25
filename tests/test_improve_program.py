@@ -330,6 +330,132 @@ class TestTheBuilderShare:
         async_session.add(cycle)
         await async_session.flush()
 
+    async def _cycle(self, async_session, program_id: str, **fields):
+        cycle = AutomationImproveCycle(
+            id=uuid.uuid4(),
+            automation_id=uuid.UUID(program_id),
+            org_id=ORG_ID,
+            repo_index=0,
+            repo_label="alpha",
+            repo_url=fields.pop("repo_url", "https://github.com/acme/alpha"),
+            status=ImproveCycleStatus.COMPLETED,
+            created_at=datetime.now(UTC) - timedelta(days=fields.pop("days_ago", 1)),
+            **fields,
+        )
+        async_session.add(cycle)
+        await async_session.flush()
+        return cycle
+
+    async def test_a_cycle_filed_under_the_wrong_runtime_is_counted(
+        self, async_client, async_session
+    ):
+        """The plan says this one is wrong today, so it has to be counted.
+
+        `builder_runtime` is reported twice — at claim time from the profile,
+        and again with whatever ran. The switch trail is the authority; a
+        cycle disagreeing with it has its share, its reviewer choice and its
+        ledger entry all filed under a runtime that did not do the work.
+        """
+        # Arrange: one cycle that failed over and was recorded correctly, one
+        # that failed over and was not.
+        program = await create_program(async_client)
+        await self._cycle(
+            async_session,
+            program["id"],
+            builder_runtime="codex",
+            runtime_switches=[{"from": "claude-code", "to": "codex"}],
+        )
+        await self._cycle(
+            async_session,
+            program["id"],
+            builder_runtime="claude-code",
+            runtime_switches=[{"from": "claude-code", "to": "codex"}],
+        )
+        await async_session.commit()
+
+        # Act
+        response = await async_client.get(
+            "/api/automation/v1/improve/builder-share?days=7"
+        )
+
+        # Assert
+        assert response.json()["misattributed_cycles"] == 1
+
+    async def test_work_redone_after_a_handoff_is_told_from_work_still_waiting(
+        self, async_client, async_session
+    ):
+        """Two different things, and only one of them is a fault.
+
+        A handoff nobody has picked up yet is work waiting. A handoff
+        overtaken by a fresh cycle on the same repository is work *redone* —
+        the next cycle paid again for what the last one had already learned,
+        which is the thing the plan asks to be zero.
+        """
+        # Arrange
+        program = await create_program(async_client)
+        handoff = {
+            "status": "incomplete",
+            "reason": "runtime_exhausted",
+            "next_steps": ["Continue from the branch diff."],
+        }
+        # Overtaken: a later cycle on the same repository.
+        await self._cycle(
+            async_session,
+            program["id"],
+            builder_runtime="claude-code",
+            handoff=handoff,
+            days_ago=3,
+        )
+        await self._cycle(
+            async_session, program["id"], builder_runtime="codex", days_ago=1
+        )
+        # Still waiting: nothing has come after it, on another repository.
+        await self._cycle(
+            async_session,
+            program["id"],
+            builder_runtime="codex",
+            handoff=handoff,
+            repo_url="https://github.com/acme/beta",
+            days_ago=2,
+        )
+        await async_session.commit()
+
+        # Act
+        response = await async_client.get(
+            "/api/automation/v1/improve/builder-share?days=7"
+        )
+
+        # Assert
+        body = response.json()
+        assert body["work_redone"] == 1
+        assert body["handoffs_waiting"] == 1
+
+    async def test_a_resumed_handoff_is_neither_redone_nor_waiting(
+        self, async_client, async_session
+    ):
+        # The whole point of the handoff: picked up, so nothing was lost and
+        # nothing is outstanding.
+        program = await create_program(async_client)
+        first = await self._cycle(
+            async_session,
+            program["id"],
+            builder_runtime="claude-code",
+            handoff={"status": "incomplete", "next_steps": ["Carry on."]},
+            days_ago=2,
+        )
+        second = await self._cycle(
+            async_session, program["id"], builder_runtime="codex", days_ago=1
+        )
+        first.resumed_by_cycle_id = second.id
+        await async_session.commit()
+
+        response = await async_client.get(
+            "/api/automation/v1/improve/builder-share?days=7"
+        )
+
+        body = response.json()
+        assert (body["work_redone"], body["handoffs_waiting"]) == (0, 0)
+
     async def test_an_even_rotation_is_within_the_target(
         self, async_client, async_session
     ):
