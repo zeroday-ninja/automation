@@ -1210,9 +1210,7 @@ class TestRotatingTheBuilder:
         # anything. Taking turns is what puts each one on the other side.
         assert builders == [BUILDER, REVIEWER, BUILDER]
 
-    async def test_two_programs_do_not_both_pick_the_same_runtime(
-        self, async_client
-    ):
+    async def test_two_programs_do_not_both_pick_the_same_runtime(self, async_client):
         """A runtime is one subscription, however many programs use it.
 
         The headroom bias asked "who has built least **for me** today", so
@@ -1961,6 +1959,39 @@ class TestParkingAndResolving:
         )
 
         assert (await async_client.get(PARKED)).json()["cycles"] == []
+
+    async def test_a_decision_sent_twice_is_one_decision(self, async_client):
+        """The gate log answers "why did this go that way". Not twice.
+
+        The service appends what a report sends, because a decision that was
+        taken cannot be un-taken by a later report. A client that re-sends the
+        log it read therefore doubled every entry in it — which is exactly
+        what the first live resume of an answered park did, leaving
+        `escalate, approve, escalate, approve, approve` on the record. A
+        doubled log reads as somebody deciding twice.
+        """
+        cycle_id = await self._parked(async_client, "nu")
+        decided = {
+            "phase": "publish",
+            "route": "approve",
+            "trigger": "asked the service again",
+            "rationale": "the person answered",
+            "at": "2026-10-25T20:31:00Z",
+        }
+
+        first = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={"gate_decisions": [decided]},
+        )
+        again = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={"gate_decisions": [decided]},
+        )
+
+        assert first.status_code == 200, first.text
+        assert again.status_code == 200, again.text
+        routes = [d["route"] for d in again.json()["gate_decisions"]]
+        assert routes == ["escalate", "approve"]
 
     async def test_a_question_is_answered_once(self, async_client):
         # It stays PARKED until a run carries the answer out, so "is it

@@ -904,7 +904,12 @@ def publish_resolved_cycle(workspace) -> bool:
     report_phase(f"{repo_label}: publishing what you approved")
 
     authority = cycle_request("GET", f"/v1/improve/cycles/{cycle_id}/authority")
-    decisions = list(cycle.get("gate_decisions") or [])
+    # Only this run's decisions. The service appends what a report sends to
+    # what is already on the record — "a routing decision that was taken
+    # cannot be un-taken by a later report" — so seeding this from the
+    # cycle's existing log re-sent the escalation and the person's answer and
+    # wrote both twice. Observed on the first live resume.
+    decisions: list[dict] = []
     decisions.append(
         gate(
             cycle.get("parked_phase") or "publish",
