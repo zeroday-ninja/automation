@@ -14,7 +14,7 @@ import logging
 import uuid
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.git_sync.config_override import effective_settings_for
@@ -22,10 +22,12 @@ from openhands.automation.improve.caps import (
     DEFAULT_DAILY_CYCLES_PER_REPOSITORY,
     cycles_today,
     cycles_today_for_org,
+    local_day_bounds,
     next_day_boundary,
 )
 from openhands.automation.improve.config import ImproveProgramConfig
 from openhands.automation.improve.url import strip_credentials
+from openhands.automation.improve.usage import runtime_statuses
 from openhands.automation.models import (
     Automation,
     AutomationGitSyncRemote,
@@ -154,27 +156,137 @@ async def latest_cycle(
 def next_builder(
     builders: list,
     previous: AutomationImproveCycle | None,
+    *,
+    built_today: dict | None = None,
+    unavailable: set | None = None,
 ):
     """Whose turn it is to build.
 
-    Derived from the last cycle's builder, the same way the repository is
-    derived from the last cycle's repository: one fact, no second counter to
-    drift. A builder that has been removed from the rotation simply does not
-    match, and the turn falls to the first.
+    Three rules, in order, and the order is the point.
 
-    Rotating the builder is what lets *every* runtime review. With one fixed
-    builder, that runtime only ever writes and never attacks anyone else's
-    work.
+    **Skip what cannot build.** A runtime that is out of usage still has its
+    turn in a bare rotation, and spends a cycle discovering that. Dropping it
+    here is the filter the plan asks for -- and if every builder is spent the
+    turn still goes round, because a cycle that runs and records the refusal
+    says more than one that never started.
+
+    **Then prefer whoever has built least today.** A rotation alone only
+    converges in the limit: it takes turns, so a runtime added to a lopsided
+    history stays lopsided for as many cycles as the history is long. The
+    headroom bias is what actually corrects a 31-to-1 split, by giving the
+    turn to the runtime that is behind until it has caught up.
+
+    **Then take turns.** With everything level this is the old behaviour
+    exactly -- derived from the last cycle's builder, the same way the
+    repository is, so there is one fact and no second counter to drift.
+
+    A builder removed from the rotation simply does not match, and the turn
+    falls to the first.
     """
     if not builders:
         raise NoRepositoriesError("the program has no builder")
+
+    spent = unavailable or set()
+    candidates = [b for b in builders if b not in spent] or list(builders)
+
+    counts = built_today or {}
+    if counts:
+        fewest = min(counts.get(b, 0) for b in candidates)
+        candidates = [b for b in candidates if counts.get(b, 0) == fewest]
+
     if previous is None or previous.builder_profile_id is None:
-        return builders[0]
+        return candidates[0]
     try:
         position = builders.index(previous.builder_profile_id)
     except ValueError:
-        return builders[0]
-    return builders[(position + 1) % len(builders)]
+        return candidates[0]
+    # Round-robin among whoever is still in the running: walk forward from
+    # the last builder and take the first candidate met, so a level field
+    # behaves exactly as it always did.
+    for step in range(1, len(builders) + 1):
+        nominee = builders[(position + step) % len(builders)]
+        if nominee in candidates:
+            return nominee
+    return candidates[0]
+
+
+async def _spent_builders(
+    session: AsyncSession,
+    automation: Automation,
+    config: ImproveProgramConfig,
+) -> set:
+    """Builders whose runtime has nothing left, so the turn can skip them.
+
+    A profile nobody has built with yet is *not* spent: it has no runtime on
+    record, and treating unknown as unavailable would keep a newly added
+    runtime out of the rotation forever -- which is the opposite of what the
+    rotation is for.
+
+    The runtime of record is the one that actually ran, read from the last
+    cycle that profile built, because a failover moves it.
+    """
+    rotation = list(config.builder_rotation)
+    if not rotation:
+        return set()
+    rows = (
+        await session.execute(
+            select(
+                AutomationImproveCycle.builder_profile_id,
+                AutomationImproveCycle.builder_runtime,
+                AutomationImproveCycle.created_at,
+            )
+            .where(
+                AutomationImproveCycle.org_id == automation.org_id,
+                AutomationImproveCycle.builder_profile_id.in_(rotation),
+                AutomationImproveCycle.builder_runtime.is_not(None),
+            )
+            .order_by(AutomationImproveCycle.created_at.desc())
+            .limit(200)
+        )
+    ).all()
+    runtime_of: dict = {}
+    for profile_id, runtime, _created in rows:
+        runtime_of.setdefault(profile_id, runtime)
+    if not runtime_of:
+        return set()
+    statuses = await runtime_statuses(
+        session, automation.org_id, sorted(set(runtime_of.values()))
+    )
+    return {
+        profile_id
+        for profile_id, runtime in runtime_of.items()
+        if runtime in statuses and not statuses[runtime].available
+    }
+
+
+async def builders_today(
+    session: AsyncSession,
+    automation: Automation,
+    *,
+    timezone_name: str,
+    now: datetime | None = None,
+) -> dict:
+    """How many cycles each builder has taken since the day began.
+
+    The program's own day, not a rolling window: the cap it sits beside is
+    counted that way, and two clocks would disagree at the boundary.
+    """
+    start, _ = local_day_bounds(timezone_name, now)
+    rows = (
+        await session.execute(
+            select(
+                AutomationImproveCycle.builder_profile_id,
+                func.count(),
+            )
+            .where(
+                AutomationImproveCycle.automation_id == automation.id,
+                AutomationImproveCycle.created_at >= start,
+                AutomationImproveCycle.builder_profile_id.is_not(None),
+            )
+            .group_by(AutomationImproveCycle.builder_profile_id)
+        )
+    ).all()
+    return {profile_id: count for profile_id, count in rows}
 
 
 def next_index(
@@ -345,7 +457,14 @@ async def claim_next_cycle(
         repo_ref=chosen.ref,
         remote_id=chosen.remote_id,
         status=ImproveCycleStatus.CLAIMED,
-        builder_profile_id=next_builder(config.builder_rotation, previous),
+        builder_profile_id=next_builder(
+            config.builder_rotation,
+            previous,
+            built_today=await builders_today(
+                session, automation, timezone_name=timezone_name
+            ),
+            unavailable=await _spent_builders(session, automation, config),
+        ),
         created_at=utcnow(),
         updated_at=utcnow(),
     )

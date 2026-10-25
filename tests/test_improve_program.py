@@ -18,6 +18,7 @@ from sqlalchemy import select
 from openhands.automation.app import app
 from openhands.automation.auth import authenticate_request
 from openhands.automation.config import clear_config_cache
+from openhands.automation.improve.rotation import next_builder
 from openhands.automation.models import (
     Automation,
     AutomationImproveCycle,
@@ -183,6 +184,123 @@ class TestCreateProgram:
             },
         )
         assert response.status_code == 422
+
+
+class TestWhoseTurnItIsToBuild:
+    """A rotation alone does not fix a lopsided history.
+
+    The program exists because one runtime built 31 of 33 cycles. Taking
+    turns corrects that only in the limit: a runtime added to a lopsided
+    history stays behind for as many cycles as the history is long. The plan
+    asks for "a filter plus a headroom bias: among available runtimes, prefer
+    the one with the fewest cycles today", and neither was implemented.
+    """
+
+    ONE = uuid.UUID("0a1b2c3d-0000-4000-8000-00000000b111")
+    TWO = uuid.UUID("0a1b2c3d-0000-4000-8000-00000000c222")
+    THREE = uuid.UUID("0a1b2c3d-0000-4000-8000-00000000d333")
+
+    def _after(self, profile_id):
+        cycle = AutomationImproveCycle(
+            id=uuid.uuid4(),
+            automation_id=uuid.uuid4(),
+            org_id=ORG_ID,
+            repo_index=0,
+            repo_label="alpha",
+            repo_url="https://github.com/acme/alpha",
+            status=ImproveCycleStatus.COMPLETED,
+        )
+        cycle.builder_profile_id = profile_id
+        return cycle
+
+    def test_the_one_that_is_behind_gets_the_turn(self):
+        # The whole point. Taking turns would hand this to TWO and leave
+        # THREE behind for another three cycles; the bias gives it to the
+        # runtime that is actually short.
+        chosen = next_builder(
+            [self.ONE, self.TWO, self.THREE],
+            self._after(self.ONE),
+            built_today={self.ONE: 9, self.TWO: 8, self.THREE: 0},
+        )
+
+        assert chosen == self.THREE
+
+    def test_a_level_field_still_simply_takes_turns(self):
+        # With everything equal this must behave exactly as it always did,
+        # or the bias would be a second rotation quietly replacing the first.
+        rotation = [self.ONE, self.TWO, self.THREE]
+        level = {self.ONE: 2, self.TWO: 2, self.THREE: 2}
+
+        assert next_builder(rotation, self._after(self.ONE), built_today=level) == (
+            self.TWO
+        )
+        assert next_builder(rotation, self._after(self.TWO), built_today=level) == (
+            self.THREE
+        )
+        assert next_builder(rotation, self._after(self.THREE), built_today=level) == (
+            self.ONE
+        )
+
+    def test_a_spent_runtime_does_not_get_a_turn_to_waste(self):
+        # In a bare rotation an exhausted runtime still takes its turn and
+        # spends a cycle discovering it cannot build.
+        chosen = next_builder(
+            [self.ONE, self.TWO, self.THREE],
+            self._after(self.ONE),
+            unavailable={self.TWO},
+        )
+
+        assert chosen == self.THREE
+
+    def test_the_turn_still_goes_round_when_every_builder_is_spent(self):
+        # A cycle that runs and records the refusal says more than one that
+        # never started: the ledger learns the reset, and the dashboard shows
+        # why nothing happened.
+        chosen = next_builder(
+            [self.ONE, self.TWO],
+            self._after(self.ONE),
+            unavailable={self.ONE, self.TWO},
+        )
+
+        assert chosen == self.TWO
+
+    def test_being_spent_outranks_being_behind(self):
+        # Order matters: a runtime with nothing left and no cycles today is
+        # the most "behind" of all, and giving it the turn on that basis
+        # would be the bias defeating the filter.
+        chosen = next_builder(
+            [self.ONE, self.TWO, self.THREE],
+            self._after(self.ONE),
+            built_today={self.ONE: 5, self.TWO: 5, self.THREE: 0},
+            unavailable={self.THREE},
+        )
+
+        assert chosen == self.TWO
+
+    async def test_a_newly_added_runtime_is_not_treated_as_spent(
+        self, async_client, async_session
+    ):
+        """A profile nobody has built with has no runtime on record.
+
+        Reading unknown as unavailable would keep a newly added runtime out
+        of the rotation forever, which is the opposite of what the rotation
+        is for — and is exactly the state Antigravity was in the moment it
+        was added.
+        """
+        # Arrange: two builders, only one of which has ever built.
+        await add_remote(async_client, "https://github.com/acme/alpha", "alpha")
+        program = await create_program(async_client, rotate_builder=[REVIEWER])
+        first = (await claim(async_client, program["id"])).json()["cycle"]
+        await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{first['id']}",
+            json={"status": "COMPLETED", "builder_runtime": "claude-code"},
+        )
+
+        # Act
+        second = (await claim(async_client, program["id"])).json()["cycle"]
+
+        # Assert: the turn went to the one that has never built.
+        assert second["builder_profile_id"] == REVIEWER
 
 
 class TestTheBuilderShare:
