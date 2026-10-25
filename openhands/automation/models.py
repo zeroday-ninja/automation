@@ -1191,6 +1191,13 @@ class AutomationRuntimeUsage(Base):
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
+    #: Vestigial, and always zero. Nothing writes these: "cycles today" is
+    #: derived from the cycle table by `cycles_today_by_runtime`, because that
+    #: table already knows and a restart cannot drop a transition in it. The
+    #: API reports real numbers under these same names, so a reader who finds
+    #: zeros here and "fixes" the API to read them would be replacing the
+    #: answer with the silence. Left in place because dropping a column
+    #: discards data, which is a decision for a person.
     cycles_attempted: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     cycles_completed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
