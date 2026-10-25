@@ -2109,6 +2109,54 @@ class TestCorrectionsBecomeLessons:
         assert response.status_code == 200, response.text
         return cycle_id
 
+    async def test_what_a_cycle_was_told_survives_the_failure_that_follows(
+        self, async_client
+    ):
+        """The one field that tells "ignored it" from "never saw it".
+
+        The runner reports it as the builder starts, and the builder may then
+        refuse. A failure update that carried no lessons must leave the ones
+        already recorded alone — otherwise a cycle that was handed a
+        correction and then ran out of usage looks exactly like one that was
+        never given it, and the repeat diagnosis has nothing to work from.
+        """
+        # Arrange: a lesson in force, and a cycle that was handed it.
+        captured = await async_client.post(
+            self.LESSONS,
+            json={
+                "scope": "user",
+                "trigger": "chat_instruction",
+                "text": "Say what a command does before running it.",
+            },
+        )
+        lesson_id = captured.json()["lesson"]["id"]
+        await add_remote(async_client, "https://github.com/acme/delta", "delta")
+        program = await create_program(async_client)
+        claimed = await claim(async_client, program["id"])
+        assert claimed.status_code == 201, claimed.text
+        cycle_id = claimed.json()["cycle"]["id"]
+        await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "status": "BUILDING",
+                "branch": "improve/20261025",
+                "injected_lesson_ids": [lesson_id],
+            },
+        )
+
+        # Act: the builder runs out, which reports no lessons of its own.
+        failed = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "status": "FAILED",
+                "error": "claude-code ran out of usage mid-change.",
+            },
+        )
+
+        # Assert
+        assert failed.status_code == 200, failed.text
+        assert failed.json()["injected_lesson_ids"] == [lesson_id]
+
     async def test_an_answer_is_filed_without_being_asked_for(self, async_client):
         # Arrange
         cycle_id = await self._parked_breaking(async_client, "alpha")

@@ -1005,6 +1005,14 @@ def execute_cycle(workspace) -> None:
                 "status": "BUILDING",
                 "branch": branch,
                 "builder_runtime": builder_runtime,
+                # Recorded here, before the builder runs, because this is the
+                # moment it becomes true. It used to be reported only with a
+                # finished build, so a cycle that was handed a correction and
+                # then ran out of usage recorded nothing -- and this field's
+                # whole job is to tell "ignored it" from "never saw it" when
+                # the same correction arrives again. Every failed cycle lost
+                # exactly the evidence the diagnosis needs.
+                "injected_lesson_ids": lesson_ids,
             }
         )
         report_phase(f"Researching an improvement for {repo_label}")
@@ -1166,10 +1174,6 @@ def execute_cycle(workspace) -> None:
             "verdict_rule_version": VERDICT_RULE_VERSION,
             "runtime_switches": trace["switches"],
             "runtime_observations": observations[-MAX_OBSERVATIONS:],
-            # What this cycle actually had in front of it. Reported rather
-            # than inferred: when the same correction arrives again, this is
-            # the only thing that tells "ignored it" from "never saw it".
-            "injected_lesson_ids": lesson_ids,
             # What the builder said it did, kept beside what the diff says it
             # did. The service raises the class to whatever the evidence
             # requires, so an understated claim cannot lower the gate.
