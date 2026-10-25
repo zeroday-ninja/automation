@@ -19,7 +19,7 @@ from openhands.automation.improve.usage import (
     DEFAULT_COOLDOWN,
     RuntimeObservation,
     choose_by_headroom,
-    note_attempt,
+    observed_runtimes,
     record_observations,
     runtime_statuses,
 )
@@ -244,11 +244,15 @@ async def test_a_request_that_worked_beats_an_estimated_reset(
 async def test_the_least_spent_available_runtime_goes_next(
     async_session,
 ) -> None:
+    """The headroom bias, against the cycles that actually ran.
+
+    This used to seed the counts with `note_attempt`, which no production
+    path calls — so it proved the bias worked on numbers nothing produced.
+    Today's counts come from the cycle table now, which is what a real
+    rotation leaves behind.
+    """
     # Arrange: the first choice has already done three cycles today.
-    for _ in range(3):
-        await note_attempt(async_session, ORG_ID, "claude-code")
-    await note_attempt(async_session, ORG_ID, "codex")
-    await async_session.commit()
+    await _cycles_built_by(async_session, ["claude-code"] * 3 + ["codex"])
     statuses = await runtime_statuses(async_session, ORG_ID, ["claude-code", "codex"])
 
     # Act
@@ -258,6 +262,95 @@ async def test_the_least_spent_available_runtime_goes_next(
     # one subscription several times faster than the other — which is exactly
     # what the recorded history showed.
     assert chosen == "codex"
+
+
+async def _cycles_built_by(
+    session, runtimes, *, status=ImproveCycleStatus.COMPLETED
+) -> Automation:
+    """Cycles on one program, one per runtime named, created now."""
+    automation = Automation(
+        id=uuid.uuid4(),
+        user_id=USER_ID,
+        org_id=ORG_ID,
+        name="rotating",
+        trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+        enabled=True,
+        tarball_path="uploads/test.tar.gz",
+        entrypoint="python main.py",
+    )
+    session.add(automation)
+    await session.flush()
+    for runtime in runtimes:
+        session.add(
+            AutomationImproveCycle(
+                id=uuid.uuid4(),
+                automation_id=automation.id,
+                org_id=ORG_ID,
+                repo_index=0,
+                repo_label="hazard",
+                repo_url="https://example.invalid/hazard",
+                status=status,
+                builder_runtime=runtime,
+            )
+        )
+    await session.commit()
+    return automation
+
+
+@pytest.mark.asyncio
+async def test_cycles_today_counts_what_ran_not_what_was_written_down(
+    async_session,
+) -> None:
+    """`0/0 cycles today`, for every runtime, always.
+
+    The ledger's two counters were incremented by `note_attempt`, which has no
+    production caller, and `cycles_completed` had no writer at all — so the
+    one surface a person asks "how much has this runtime done today" from
+    could only ever answer zero. The cycle table already knew.
+    """
+    # Arrange: two finished, one still going.
+    await _cycles_built_by(async_session, ["codex", "codex"])
+    await _cycles_built_by(
+        async_session, ["codex"], status=ImproveCycleStatus.REVIEWING
+    )
+
+    # Act
+    statuses = await runtime_statuses(async_session, ORG_ID, ["codex"])
+
+    # Assert: attempted counts the one in flight, because it has already
+    # spent something; completed does not, because it has not finished.
+    assert statuses["codex"].cycles_attempted == 3
+    assert statuses["codex"].cycles_completed == 2
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_that_names_nothing_is_not_offered_as_available(
+    async_session,
+) -> None:
+    """`custom available 0/0 cycles today` is an offer you cannot take.
+
+    A profile with a custom launch command records the literal "custom", so
+    the ledger grows a row for it. It is already kept out of the share for
+    the same reason: it is what a lookup says when it could not tell, and
+    several real runtimes land under the one word.
+    """
+    # Arrange
+    seen = datetime.now(UTC)
+    await record_observations(
+        async_session,
+        ORG_ID,
+        [
+            RuntimeObservation(runtime=name, outcome="ok", observed_at=seen)
+            for name in ("codex", "custom")
+        ],
+    )
+    await async_session.commit()
+
+    # Act
+    observed = await observed_runtimes(async_session, ORG_ID)
+
+    # Assert
+    assert observed == ["codex"]
 
 
 @pytest.mark.asyncio

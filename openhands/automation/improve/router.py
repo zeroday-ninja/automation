@@ -692,6 +692,11 @@ async def get_runtime_usage(
     The evidence travels with the verdict. A reader deciding whether to trust
     an exhaustion needs what was seen, not only the conclusion — and the
     conclusion for a runtime with no rows is "unknown", not "healthy".
+
+    "Today" is the UTC day here, where a program's cap is counted in the
+    program's own cron timezone. This answer spans every program in the org,
+    so there is no single zone to use, and UTC is the one that does not
+    silently pick one program's.
     """
     runtimes = await observed_runtimes(session, user.org_id)
     statuses = await runtime_statuses(session, user.org_id, runtimes)
