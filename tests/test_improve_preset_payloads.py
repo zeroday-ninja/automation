@@ -192,6 +192,30 @@ def _constants(node: ast.Dict) -> dict:
     return found
 
 
+def test_the_handoff_asks_each_question_of_the_right_source(runner) -> None:
+    """Two near-identical questions, each answered with the other's answer.
+
+    `pushed` is the remote's answer — is there a branch for the next cycle to
+    see. `saved["pushed"]` is this cycle's — did it get its work onto that
+    branch. They differ exactly when an earlier cycle pushed the branch and
+    this one could not add to it, which is the case worth hearing about.
+
+    The "work was not saved" note was gated on the remote's answer, so a
+    branch already on the remote silenced the one report that said a cycle's
+    work had been dropped. The prose was gated on this cycle's push, so a
+    branch that was on the remote all along got no prose attached. Found when
+    a live proof of the prose quietly did nothing.
+
+    Read as source because the runner executes a whole cycle on import.
+    """
+    body = RUNNER_PATH.read_text()
+
+    # The note is about this cycle's own push.
+    assert 'if saved.get("note") and not saved.get("pushed"):' in body
+    # The prose is about there being a branch at all.
+    assert "if pushed and os.path.exists(prose_path):" in body
+
+
 PROMPT_PATH = RUNNER_PATH.parent / "builder_prompt.md"
 
 REPORT_PATH = RUNNER_PATH.parent / "report.py"
