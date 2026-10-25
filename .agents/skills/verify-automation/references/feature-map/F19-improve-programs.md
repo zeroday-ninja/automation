@@ -41,7 +41,7 @@ Routes: `POST /api/automation/v1/preset/improve`, `POST /api/automation/v1/impro
 ## Sub-features
 
 - `F19.create`: a minimal improvement program answers 201 with `preset_metadata {preset_type: improve, improve: {...}}` carrying the configuration defaults (`repository_source: git_sync`, `branch_prefix: improve/`, `max_changed_files: 20`, `open_pr: true`, `reviewer_profile_ids: []`, `focus: null`), `agent_profile_id` set to the builder profile, `model: null`, `setup_script_path: setup.sh`, `entrypoint: .venv/bin/python main.py`, `timeout: 600`, an `oh-internal://uploads/<id>` tarball path, and a `COMPLETED` upload named `improve-program-<name>`; a username or password embedded in an explicit repository URL is dropped before the configuration is stored rather than refused.
-- `F19.tarball`: the generated tarball holds exactly `builder_prompt.md`, `main.py`, `report.py`, `reviewer_prompt.md` and `setup.sh`, `setup.sh` is mode 0755, `main.py` calls the claim and cycle routes, and no member names the program's profiles or repositories — a run reads them from its claim.
+- `F19.tarball`: the generated tarball holds exactly the runner (`main.py`, `report.py`, `context.py`), the rule modules the service shares with it (`change_class.py`, `lessons.py`, `routing.py`), the four prompt templates (`builder_prompt.md`, `reviewer_prompt.md`, `handoff_prompt.md`, `judge_prompt.md`) and `setup.sh`; `setup.sh` is mode 0755, `main.py` calls the claim and cycle routes, and no member names the program's profiles or repositories — a run reads them from its claim.
 - `F19.create-validation`: a missing `improve`, an unknown field, `state: DRAFT`, an over-long timeout, a builder that is also a reviewer, duplicate or more than four reviewers, `repository_source: explicit` without `repositories`, `repositories` or `repository_labels` combined with the wrong source, a repository URL git cannot clone, a `branch_prefix` git forbids and `max_changed_files` out of range each answer 422 with their own message and create nothing.
 - `F19.config-replace`: `PUT .../config` replaces the whole configuration, answers the new rotation with the repository it puts up next, stores it on the automation, moves `agent_profile_id` to the new builder, marks the automation dirty for git sync, leaves the tarball alone, and is what the next claim runs on.
 - `F19.config-validation`: the config route refuses every configuration a create would refuse and changes nothing; a non-program answers 409, an unknown automation 404, an id that is not a UUID 422.
@@ -54,6 +54,9 @@ Routes: `POST /api/automation/v1/preset/improve`, `POST /api/automation/v1/impro
 - `F19.cycle-soul`: a cycle records `soul_suggestions` as `{text, why}` proposals for the user's `SOUL.md` (empty on a fresh cycle, an empty `text` refused), and no route lets a run edit that document.
 - `F19.cycle-review`: a report of the reviews and the verdict completes the cycle, stamps `completed_at`, and keeps each review's runtime, concerns and stale sources as well as the builder's sources and soul suggestions.
 - `F19.cycle-terminal`: a `COMPLETED` or `FAILED` cycle is immutable (409 naming its status); an unknown cycle id answers 404.
+- `F19.handoff-write`: a cycle whose runtime ran out mid-change reports where it got to in the same `FAILED` report, and the service stores it stamped: `schema_version: 1`, the prose path on the branch (`.improve-cycle/handoff.md`), and `written_by` taken from the cycle's own builder of record rather than from anything the run claims. A record with no `next_steps` is stored as absent, not half-trusted, because a handoff with no next step is indistinguishable from a restart.
+- `F19.handoff-resume`: the next claim on the same repository is handed that work in the claim's own `resume`, including `branch_pushed` so the run can tell a branch it can fetch from one it cannot, and the chain is written in both directions (`resumed_from_cycle_id` on the new cycle, `resumed_by_cycle_id` on the old one). Taking it is what makes it exactly-once: a later claim on the same repository is offered the newest *unclaimed* handoff, never the same one twice.
+- `F19.handoff-unpushed`: a handoff whose branch never reached the remote is stored re-aimed rather than dropped — `branch` and `head_sha` nulled, `next_steps` prefixed with redoing the work from the plan — so the reasoning survives and nobody is sent to fetch commits that exist only in a deleted sandbox. That is also what the next cycle is handed.
 - `F19.cycles-page`: `GET .../cycles` lists the program's cycles newest first with the total, pages with `limit` and `offset`, clamps `limit` into 1..100 and a negative `offset` to 0, and answers 422 for a non-integer `limit`.
 - `F19.rotation-git-sync`: a `git_sync` program rotates over every Git Sync remote that has a repository URL, ordered by `(created_at, id)`; promoting a remote to default does not reshuffle the rotation, a disabled remote stays in it, and a remote whose URL was cleared drops out.
 - `F19.rotation-labels`: `repository_labels` keeps only the listed remotes in the rotation, ignores a label no remote has, and is what the claim rotates over.
@@ -69,6 +72,8 @@ Routes: `POST /api/automation/v1/preset/improve`, `POST /api/automation/v1/impro
 - `F19.builder-share`: `GET /v1/improve/builder-share` answers how evenly the building was divided between runtimes over a window of `days`, across every program in the org: each runtime's cycles and its share of them, and `evenness_gap`, the widest share's distance from an even split in percentage points, against the `target_gap: 20.0` the plan asks for, carried with the answer so a reader does not have to know it. Counted from each cycle's builder of record, which is the runtime that actually ran rather than the one the profile named, and `null` rather than a gap of zero when nothing was built.
 - `F19.builder-share-not-yet`: `days_covered` travels with that answer and `within_target` is null, not false, until it reaches the window: a week asked of a day of history still reports the gap and withholds the verdict, because an unmet measure and an unmeasurable one are different answers.
 - `F19.builder-share-scoped`: `automation_id` scopes that answer to one program, echoes the id back and reports `configured_builders` beside it, and changes what "even" measures against: the denominator is the larger of the runtimes seen and the runtimes the program is configured to rotate, so a program running one of its three is a 66.7-point gap where the org-wide reading calls the same cycles a perfect split. Both fields are null unscoped, because there is then no single configuration for "even" to mean anything against, and an `automation_id` that is not a program's is an error rather than quietly the whole org.
+- `F19.attribution-faults`: the share arrives with the two counts of work whose builder the record cannot be trusted about. `unattributed_cycles` is the cycles whose `builder_runtime` names no runtime at all — the literal `custom` a profile with its own launch command records, or the `acp` fallback when the detail lookup failed — kept out of the share rather than counted as a runtime, so two cycles can produce a one-runtime share with the other accounted for beside it instead of hidden in it. `misattributed_cycles` is the cycles whose recorded builder disagrees with the last leg of their own `runtime_switches` trail; the trail is the authority, because the runtime is reported twice and only the second report says what actually ran.
+- `F19.handoff-faults`: the same answer carries the three counts of what the rotation did with its handoffs. `handoffs_waiting` is the handoffs nobody has picked up yet — not a fault, but reported, because a number that only counts failures cannot show work piling up. `handoffs_unsaved` is the handoffs whose branch never reached the remote, and it keeps counting after the handoff is resumed, because the code was gone either way. `work_redone` is a handoff that was never resumed and was then overtaken by a later cycle on the same repository URL: the claim matches a handoff by label (or remote id), so relabelling a repository orphans one, and this is the count that notices.
 - `F19.provenance`: `GET /v1/improve/provenance` answers how many merged changes can be followed back to what produced them over a window of `days`, against the `target_coverage: 0.95` the plan asks for, carried with the answer so a reader does not have to know it. Three buckets rather than one ratio: `from_commit` is the strong answer, where a reader holding a line of `git log` starts; `from_pull_request` is the squash merge, whose commit was rewritten and whose trail leads back by a longer route, counted apart so it cannot pass as the stronger answer; and `unresolved` arrives with a `missing` map naming which part is gone (`prompt_digest`, `sources` or `merge_commit_sha`), because a bare total says the trail is broken and this says where. Only merged cycles count, so a cycle with no `merged_at` is not in the denominator at all, and with nothing merged `coverage` and `within_target` are both null rather than `1.0` and `true` — no merged work is not perfect provenance.
 - `F19.provenance-scoped`: `automation_id` scopes that answer to one program and echoes the id back, null unscoped. Nothing else about the measure moves with it — the same window, the same target — but the rows it counts are enough to put a program and its org on opposite sides of the verdict over the same cycles, so a program whose trail is complete is invisible inside the org's average. An `automation_id` that is not a program's is an error rather than quietly the whole org.
 - `F19.parked-list`: `GET /v1/improve/parked` answers everything waiting for a person across every program in the org, because the question is "what is waiting on me" and an answer that needs the reader to know which program to look in is not an answer.
@@ -116,6 +121,29 @@ Routes: `POST /api/automation/v1/preset/improve`, `POST /api/automation/v1/impro
   `builder_prompt.md` and `reviewer_prompt.md` are the prompts it renders, and
   `AUTOMATION_AGENT_PROFILE_ID` is ignored because the program names its own
   profiles.
+- Handing work over: a run whose builder ran out of usage or time sends its
+  `handoff` in the same `PATCH` that reports `status: FAILED`
+  (`sdk_main.py:write_handoff` — it pushes the branch first, then renders
+  `handoff_prompt.md` to ask the runtime that just refused where it got to,
+  and falls back to a record built from `git rev-parse` alone when there is
+  nothing left to ask). The structured record is what the service stores; the
+  prose copy stays on the branch at `.improve-cycle/handoff.md`, which is
+  the `long_form_path` the stored record points at. `branch_pushed` is
+  `git ls-remote`'s answer, not the push's exit code.
+- Picking it up: the claim response's `resume` (`HandoffResume`) is the only
+  thing a run reads to continue — `sdk_main.py` keeps the previous cycle's
+  branch instead of opening a new one, and only when `branch_pushed` is true,
+  and `context.py:resume_section` renders `do_not` ahead of the next steps,
+  since the rejected approaches are what stop the next runtime spending its
+  budget on the same dead end. A run never searches for a branch by name: the
+  claim already points at the cycle it is continuing.
+- The dashboard's reading of all this is `GET /v1/improve/builder-share`,
+  which carries `unattributed_cycles`, `misattributed_cycles`, `work_redone`,
+  `handoffs_waiting` and `handoffs_unsaved` beside the shares
+  (`improve/usage.py:rotation_faults`). The cycle rows behind them are on
+  `GET .../cycles`: `handoff`, `resumed_from_cycle_id` and
+  `resumed_by_cycle_id` are part of `CycleResponse`, so a client can show the
+  chain rather than two cycles that happen to share a branch.
 - Agent Server: the run creates one conversation per profile
   (`RemoteConversation` with `agent_profile_id`), reads the available profiles
   from `/api/agent-profiles` and picks every runtime other than the builder's
@@ -717,6 +745,110 @@ Preconditions:
   control-automation api GET "/v1/improve/cycles/$ECID/authority" --expect 200 --check route eq cycle --check reason matches 'did not pass'
   ```
 
+- **Hand the work over when a runtime runs out (`F19.handoff-write`, `F19.handoff-resume`).**
+  A cycle that ran out mid-change says where it got to in the same report that
+  fails it, and the next claim on that repository is handed exactly that.
+  ```sh
+  HID=$(control-automation api POST /v1/preset/improve --json "{\"name\":\"qa improve handoff\",\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"},\"improve\":{\"builder_profile_id\":\"$BUILDER\",\"repository_source\":\"explicit\",\"repositories\":[{\"label\":\"qa handoff one\",\"url\":\"https://qa.invalid/handoff-one.git\"},{\"label\":\"qa handoff two\",\"url\":\"https://qa.invalid/handoff-two.git\"}]}}" --expect 201 --field id)
+  HC1=$(control-automation api POST "/v1/improve/$HID/claim" --json '{}' --expect 201 --check cycle.repository.label eq 'qa handoff one' --check resume eq null --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$HC1" --json '{"status":"FAILED","builder_runtime":"qa-runtime-one","error":"qa-runtime-one ran out of usage mid-change. Its work is handed to the next cycle.","branch":"improve/qa-handoff","handoff":{"status":"incomplete","reason":"runtime_exhausted","branch":"improve/qa-handoff","branch_pushed":true,"head_sha":"c0ffee1c0ffee1c0ffee1c0ffee1c0ffee1c0ffe","stage":"implementing","goal":"Add the missing index to the runs table","done":["read the schema"],"next_steps":["Write the migration"],"do_not":["do not add a second index on the same column"],"files_touched":["migrations/versions/036.py"]}}' --expect 200 --check status eq FAILED --check handoff.schema_version eq 1 --check handoff.status eq incomplete --check handoff.reason eq runtime_exhausted --check handoff.branch eq improve/qa-handoff --check handoff.branch_pushed eq true --check handoff.next_steps len-eq 1 --check handoff.do_not.0 contains 'second index' --check handoff.long_form_path eq .improve-cycle/handoff.md --check handoff.written_by eq qa-runtime-one --check handoff.written_at exists --save F19.handoff-write/written
+  control-automation api GET "/v1/improve/$HID/cycles" --expect 200 --check total eq 1 --check cycles.0.id eq "$HC1" --check cycles.0.handoff.goal contains 'missing index' --check cycles.0.resumed_from_cycle_id eq null --check cycles.0.resumed_by_cycle_id eq null --save F19.handoff-write/stored
+  HC2=$(control-automation api POST "/v1/improve/$HID/claim" --json '{}' --expect 201 --check cycle.repository.label eq 'qa handoff two' --check resume eq null --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$HC2" --json '{"status":"BUILDING","builder_runtime":"qa-runtime-one","handoff":{"status":"incomplete","reason":"runtime_exhausted","branch":"improve/qa-nothing","branch_pushed":true,"goal":"ran out before it could say anything"}}' --expect 200 --check status eq BUILDING --check handoff eq null --save F19.handoff-write/no-next-steps
+  HC3=$(control-automation api POST "/v1/improve/$HID/claim" --json '{}' --expect 201 --check cycle.repository.label eq 'qa handoff one' --check cycle.resumed_from_cycle_id eq "$HC1" --check resume.from_cycle_id eq "$HC1" --check resume.reason eq runtime_exhausted --check resume.branch eq improve/qa-handoff --check resume.branch_pushed eq true --check resume.head_sha eq c0ffee1c0ffee1c0ffee1c0ffee1c0ffee1c0ffe --check resume.goal contains 'missing index' --check resume.next_steps.0 contains 'Write the migration' --check resume.do_not len-eq 1 --check resume.written_by eq qa-runtime-one --save F19.handoff-resume/claim --field cycle.id)
+  control-automation api GET "/v1/improve/$HID/cycles" --expect 200 --check total eq 3 --check cycles.0.id eq "$HC3" --check cycles.0.resumed_from_cycle_id eq "$HC1" --check cycles.2.id eq "$HC1" --check cycles.2.resumed_by_cycle_id eq "$HC3" --save F19.handoff-resume/chain
+  ```
+  The handoff travels on the report that ends the cycle, so a run that ran
+  out needs no extra route and a cycle that died without reaching one simply
+  has none. What comes back is the agent's record plus what only the service
+  can add: `schema_version`, the `.improve-cycle/handoff.md` path the prose
+  was written to, and `written_by` taken from the cycle's own builder of
+  record — the same report updates that to whichever runtime actually ran, so
+  a second source here could only disagree with it. The second cycle's record
+  has no `next_steps` and is stored as `null`: a handoff with no next step is
+  indistinguishable from a restart, and one that is half-trusted is worse
+  than none, because the next cycle will act on it. The third claim takes the
+  rotation back to the first repository and is handed the work with the
+  branch, the commit and the rejected approaches, and the chain is then
+  readable in both directions — forward from the new cycle, back from the old
+  one — which is what makes a client able to show a continuation rather than
+  two cycles that happen to share a branch.
+- **A branch that never reached the remote (`F19.handoff-unpushed`).** The
+  reasoning survives, the commits do not, and the stored record is re-aimed
+  at that instead of pointing at a diff nobody can fetch.
+  Requires: `F19.handoff-write`
+  ```sh
+  control-automation api PATCH "/v1/improve/cycles/$HC3" --json '{"status":"FAILED","builder_runtime":"qa-runtime-two","error":"qa-runtime-two ran out of time mid-change.","handoff":{"status":"incomplete","reason":"timed_out","branch":"improve/qa-handoff","branch_pushed":false,"head_sha":"dead100dead100dead100dead100dead100dead1","stage":"implementing","goal":"Finish the migration the last cycle started","done":["wrote the migration"],"next_steps":["Run the migration against SQLite"],"do_not":["do not reuse the 035 revision id"]}}' --expect 200 --check handoff.branch_pushed eq false --check handoff.branch eq null --check handoff.head_sha eq null --check handoff.next_steps len-eq 2 --check handoff.next_steps.0 contains 'never pushed' --check handoff.next_steps.1 contains 'Run the migration' --check handoff.do_not len-eq 1 --check handoff.goal contains 'Finish the migration' --save F19.handoff-unpushed/stored
+  HC4=$(control-automation api POST "/v1/improve/$HID/claim" --json '{}' --expect 201 --check cycle.repository.label eq 'qa handoff two' --check resume eq null --field cycle.id)
+  HC5=$(control-automation api POST "/v1/improve/$HID/claim" --json '{}' --expect 201 --check cycle.repository.label eq 'qa handoff one' --check cycle.resumed_from_cycle_id eq "$HC3" --check resume.from_cycle_id eq "$HC3" --check resume.reason eq timed_out --check resume.branch eq null --check resume.branch_pushed eq false --check resume.head_sha eq null --check resume.next_steps.0 contains 'never pushed' --check resume.do_not.0 contains '035' --check resume.written_by eq qa-runtime-two --save F19.handoff-unpushed/resume --field cycle.id)
+  ```
+  The record is kept and re-aimed: `branch` and `head_sha` are dropped
+  because a new sandbox cannot see an unpushed branch, and `next_steps` gains
+  a first line saying to redo the work from the plan below — the plan being
+  the rest of the list, which is most of a handoff's value and the part that
+  survives. The fourth claim is the rotation's other repository and is handed
+  nothing, because the handoff the second cycle tried to write was never
+  stored. The fifth is handed the *third* cycle's work rather than the
+  first's: taking a handoff marks it, so each one is offered exactly once and
+  the chain moves forward instead of looping on the oldest record.
+- **The faults the share is read beside (`F19.handoff-faults`).** What the
+  rotation did with its handoffs, counted where the share is read, including
+  the one nobody picked up.
+  Requires: `F19.handoff-unpushed`
+  ```sh
+  control-automation api PATCH "/v1/improve/cycles/$HC5" --json '{"status":"FAILED","builder_runtime":"qa-runtime-two","error":"qa-runtime-two ran out of usage mid-change.","handoff":{"status":"incomplete","reason":"runtime_exhausted","branch":"improve/qa-handoff","branch_pushed":true,"head_sha":"f00dbab0f00dbab0f00dbab0f00dbab0f00dbab0","stage":"implementing","goal":"Still finishing the migration","next_steps":["Run the migration against PostgreSQL"]}}' --expect 200 --check handoff.branch_pushed eq true
+  control-automation api GET /v1/improve/builder-share --query days=1 --query "automation_id=$HID" --expect 200 --check cycles eq 4 --check runtimes len-eq 2 --check handoffs_waiting eq 1 --check handoffs_unsaved eq 1 --check work_redone eq 0 --check misattributed_cycles eq 0 --check unattributed_cycles eq 0 --save F19.handoff-faults/waiting-and-unsaved
+  RDID=$(control-automation api POST /v1/preset/improve --json "{\"name\":\"qa improve redone\",\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"},\"improve\":{\"builder_profile_id\":\"$BUILDER\",\"repository_source\":\"explicit\",\"repositories\":[{\"label\":\"qa redone\",\"url\":\"https://qa.invalid/redone.git\"}]}}" --expect 201 --field id)
+  RD1=$(control-automation api POST "/v1/improve/$RDID/claim" --json '{}' --expect 201 --check cycle.repository.label eq 'qa redone' --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$RD1" --json '{"status":"FAILED","builder_runtime":"qa-runtime-one","handoff":{"status":"incomplete","reason":"runtime_exhausted","branch":"improve/qa-redone","branch_pushed":true,"head_sha":"abc1230abc1230abc1230abc1230abc1230abc12","stage":"implementing","goal":"Split the oversized module","next_steps":["Move the second half into its own file"],"do_not":["do not reformat the whole file"]}}' --expect 200 --check handoff.branch_pushed eq true
+  control-automation api GET /v1/improve/builder-share --query days=1 --query "automation_id=$RDID" --expect 200 --check handoffs_waiting eq 1 --check work_redone eq 0
+  control-automation api PUT "/v1/improve/$RDID/config" --json "{\"builder_profile_id\":\"$BUILDER\",\"repository_source\":\"explicit\",\"repositories\":[{\"label\":\"qa redone renamed\",\"url\":\"https://qa.invalid/redone.git\"}]}" --expect 200 --check repositories.0.label eq 'qa redone renamed' --check repositories.0.url eq https://qa.invalid/redone.git
+  control-automation api POST "/v1/improve/$RDID/claim" --json '{}' --expect 201 --check cycle.repository.label eq 'qa redone renamed' --check cycle.repository.url eq https://qa.invalid/redone.git --check cycle.resumed_from_cycle_id eq null --check resume eq null --save F19.handoff-faults/orphaned-claim
+  control-automation api GET /v1/improve/builder-share --query days=1 --query "automation_id=$RDID" --expect 200 --check work_redone eq 1 --check handoffs_waiting eq 0 --check handoffs_unsaved eq 0 --save F19.handoff-faults/work-redone
+  ```
+  Three different things, counted apart on purpose, and counted over rows the
+  share leaves out: the program has five cycles and `cycles` is 4, because the
+  fourth was claimed and never reported and so names no builder, while every
+  fault count covers it. `handoffs_waiting` is the queue: the fifth cycle's
+  handoff, written and not yet picked up, which is not a fault and is reported
+  anyway because a measure that only counts failures cannot show work quietly
+  piling up. `handoffs_unsaved` is the third cycle's, and it still reads 1
+  after that handoff was resumed exactly as intended — the code was gone
+  either way, which is why it is not folded into `work_redone`, a count that
+  sat at zero through four live handoffs of this kind. `work_redone` is the orphan: relabelling the repository in the
+  configuration leaves the claim unable to match the handoff, which it does
+  by label (or by remote id for a Git Sync rotation) and not by URL, so the
+  next cycle on the same URL starts from nothing while a usable handoff sits
+  unclaimed. The claim is the read-back that proves it — `resume: null` on a
+  repository that has one waiting — and the counter is what makes that
+  visible without reading the history by hand. `handoffs_waiting` then drops
+  to 0 because that handoff is no longer waiting on anybody: it has already
+  been overtaken.
+- **A builder of record nobody can check (`F19.attribution-faults`).** Two
+  cycles, one share, and both ways the recorded builder fails to name who did
+  the work.
+  ```sh
+  ATID=$(control-automation api POST /v1/preset/improve --json "{\"name\":\"qa improve attribution\",\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"},\"improve\":{\"builder_profile_id\":\"$BUILDER\",\"repository_source\":\"explicit\",\"repositories\":[{\"label\":\"qa attribution one\",\"url\":\"https://qa.invalid/attr-one.git\"},{\"label\":\"qa attribution two\",\"url\":\"https://qa.invalid/attr-two.git\"}]}}" --expect 201 --field id)
+  AT1=$(control-automation api POST "/v1/improve/$ATID/claim" --json '{}' --expect 201 --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$AT1" --json '{"status":"REVIEWING","builder_runtime":"qa-runtime-one","runtime_switches":[{"from":"qa-runtime-one","to":"qa-runtime-two","why":"usage_exhausted"}],"summary":"failed over mid-change and finished elsewhere"}' --expect 200 --check builder_runtime eq qa-runtime-one --check runtime_switches len-eq 1 --check runtime_switches.0.to eq qa-runtime-two --save F19.attribution-faults/misattributed
+  AT2=$(control-automation api POST "/v1/improve/$ATID/claim" --json '{}' --expect 201 --field cycle.id)
+  control-automation api PATCH "/v1/improve/cycles/$AT2" --json '{"status":"REVIEWING","builder_runtime":"custom","summary":"a profile with its own launch command"}' --expect 200 --check builder_runtime eq custom --save F19.attribution-faults/unattributed
+  control-automation api GET /v1/improve/builder-share --query days=1 --query "automation_id=$ATID" --expect 200 --check cycles eq 1 --check runtimes len-eq 1 --check runtimes.0.runtime eq qa-runtime-one --check runtimes.0.share eq 1.0 --check unattributed_cycles eq 1 --check misattributed_cycles eq 1 --check work_redone eq 0 --check handoffs_waiting eq 0 --save F19.attribution-faults/counted
+  ```
+  Two cycles ran and the share counts one. The `custom` cycle is kept out of
+  it rather than reported as a runtime called `custom`, because several
+  different real runtimes land under that one word and folding them in widens
+  the denominator for "even" — the measure would move with how a profile was
+  configured instead of with who did the building — and it is counted beside
+  the share rather than dropped, since work whose runtime nobody can name is
+  a gap in the record. The first cycle's recorded builder is
+  `qa-runtime-one` while its own switch trail ends at `qa-runtime-two`, so it
+  is counted as misattributed: the trail says where the turn ended, and a
+  share, a reviewer choice and a usage ledger filed under a runtime that did
+  not do the work are three wrong answers from one record. The plan asks for
+  this count to be zero and says that today it is not, which is exactly why
+  it is counted rather than assumed.
+
 ## Gotchas
 
 - `PUT .../config` is a replacement, not a patch: a field left out of the
@@ -775,3 +907,37 @@ Preconditions:
   provenance bullet's squash-merge reading does. The window here defaults to 30
   days, not the 7 of `/builder-share`, and unscoped it spans every program in
   the org, this harness's own cycles included.
+- The five fault counts on `/builder-share` are counted over *every* cycle in
+  the window, while `cycles` and `runtimes` only cover the ones that named a
+  builder. A program whose cycles were all claimed and never reported answers
+  `cycles: 0` with fault counts that are not zero, and that is not a
+  contradiction. Scope the fault reading with `?automation_id=` when a recipe
+  asserts exact numbers: unscoped it also counts every other program this
+  harness created.
+- `handoffs_unsaved` is a historical count, not a queue: a handoff whose
+  branch never reached the remote keeps being counted after it is resumed,
+  because the code was gone either way. Only `handoffs_waiting` empties, and
+  it excludes the handoffs `work_redone` has already claimed, so the three
+  numbers do not add up to "handoffs written".
+- A claim matches a handoff by repository *label*, or by `remote_id` for a Git
+  Sync rotation — never by URL, while `work_redone` groups by URL. So
+  relabelling a repository through `PUT .../config` orphans an unfinished
+  handoff (the next cycle is handed nothing and starts over) and the orphan
+  shows up only as `work_redone`. The lookup also only considers the 20 newest
+  cycles in the org that still hold an unclaimed handoff, so a replay that
+  writes many handoffs can push an older one out of reach.
+- A stored unpushed handoff has no `branch` and no `head_sha` — the service
+  drops both — so neither the cycle record nor the claim's `resume` names a
+  branch for it. Assert the redo line that `next_steps` gains, not a branch
+  name.
+- A claim is the only thing either brake acts on, and this family is close to
+  both. One repository may take 10 cycles a day
+  (`AUTOMATION_IMPROVE_DAILY_CYCLES_PER_REPOSITORY`) and the whole
+  organization 40 (`AUTOMATION_IMPROVE_GLOBAL_DAILY_CEILING`); a full replay
+  takes 36 of those 40 — 37 when the dispatched run in `F19.claim-run-id`
+  manages a second claim of its own — with `qa alpha` at 8 of its 10 and no
+  other repository above 3. A new bullet that
+  claims must count its cycles — the 409 would land on whichever recipe
+  happened to be next, not on the one that overspent — or raise the ceiling
+  for its own run with `restart --service automation --env`. Neither brake has
+  a sub-feature of its own yet.

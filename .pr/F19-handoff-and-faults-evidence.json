@@ -1,0 +1,1142 @@
+{
+ "F19.handoff-write/written": {
+  "request": {
+   "method": "PATCH",
+   "path": "/api/automation/v1/improve/cycles/e54f10d0-1685-417a-8845-e0cb0263429e",
+   "query": []
+  },
+  "status": 200,
+  "body": {
+   "id": "e54f10d0-1685-417a-8845-e0cb0263429e",
+   "automation_id": "04c4aa77-92a1-4626-8931-a98f0378abb5",
+   "run_id": null,
+   "status": "FAILED",
+   "verdict": null,
+   "repository": {
+    "label": "qa handoff one",
+    "url": "https://qa.invalid/handoff-one.git",
+    "ref": null,
+    "index": 0,
+    "remote_id": null
+   },
+   "builder_profile_id": "11111111-1111-4111-8111-111111111111",
+   "builder_runtime": "qa-runtime-one",
+   "runtime_switches": null,
+   "change_class": null,
+   "claimed_change_class": null,
+   "change_evidence": null,
+   "handoff": {
+    "schema_version": 1,
+    "status": "incomplete",
+    "reason": "runtime_exhausted",
+    "branch": "improve/qa-handoff",
+    "branch_pushed": true,
+    "head_sha": "c0ffee1c0ffee1c0ffee1c0ffee1c0ffee1c0ffe",
+    "stage": "implementing",
+    "goal": "Add the missing index to the runs table",
+    "done": [
+     "read the schema"
+    ],
+    "next_steps": [
+     "Write the migration"
+    ],
+    "do_not": [
+     "do not add a second index on the same column"
+    ],
+    "files_touched": [
+     "migrations/versions/036.py"
+    ],
+    "long_form_path": ".improve-cycle/handoff.md",
+    "written_by": "qa-runtime-one",
+    "written_at": "2026-10-25T10:05:02.135630+00:00"
+   },
+   "resumed_from_cycle_id": null,
+   "resumed_by_cycle_id": null,
+   "gate_decisions": null,
+   "injected_lesson_ids": null,
+   "judge_attestation": null,
+   "parked_phase": null,
+   "parked_question": null,
+   "parked_plan": null,
+   "parked_at": null,
+   "resolution": null,
+   "resolved_at": null,
+   "builder_conversation_id": null,
+   "summary": null,
+   "branch": "improve/qa-handoff",
+   "pr_url": null,
+   "sources": [],
+   "reviews": [],
+   "soul_suggestions": [],
+   "error": "qa-runtime-one ran out of usage mid-change. Its work is handed to the next cycle.",
+   "base_sha": null,
+   "head_sha": null,
+   "merged_at": null,
+   "merge_commit_sha": null,
+   "identity_cost": null,
+   "changed_files": [],
+   "checks": [],
+   "followups": [],
+   "risks": [],
+   "prompt_digest": null,
+   "verdict_rule_version": null,
+   "reaped": false,
+   "created_at": "2026-10-25T10:05:01.820825Z",
+   "updated_at": "2026-10-25T10:05:02.135684Z",
+   "completed_at": "2026-10-25T10:05:02.135682Z"
+  }
+ },
+ "F19.handoff-write/stored": {
+  "request": {
+   "method": "GET",
+   "path": "/api/automation/v1/improve/04c4aa77-92a1-4626-8931-a98f0378abb5/cycles",
+   "query": []
+  },
+  "status": 200,
+  "body": {
+   "cycles": [
+    {
+     "id": "e54f10d0-1685-417a-8845-e0cb0263429e",
+     "automation_id": "04c4aa77-92a1-4626-8931-a98f0378abb5",
+     "run_id": null,
+     "status": "FAILED",
+     "verdict": null,
+     "repository": {
+      "label": "qa handoff one",
+      "url": "https://qa.invalid/handoff-one.git",
+      "ref": null,
+      "index": 0,
+      "remote_id": null
+     },
+     "builder_profile_id": "11111111-1111-4111-8111-111111111111",
+     "builder_runtime": "qa-runtime-one",
+     "runtime_switches": null,
+     "change_class": null,
+     "claimed_change_class": null,
+     "change_evidence": null,
+     "handoff": {
+      "schema_version": 1,
+      "status": "incomplete",
+      "reason": "runtime_exhausted",
+      "branch": "improve/qa-handoff",
+      "branch_pushed": true,
+      "head_sha": "c0ffee1c0ffee1c0ffee1c0ffee1c0ffee1c0ffe",
+      "stage": "implementing",
+      "goal": "Add the missing index to the runs table",
+      "done": [
+       "read the schema"
+      ],
+      "next_steps": [
+       "Write the migration"
+      ],
+      "do_not": [
+       "do not add a second index on the same column"
+      ],
+      "files_touched": [
+       "migrations/versions/036.py"
+      ],
+      "long_form_path": ".improve-cycle/handoff.md",
+      "written_by": "qa-runtime-one",
+      "written_at": "2026-10-25T10:05:02.135630+00:00"
+     },
+     "resumed_from_cycle_id": null,
+     "resumed_by_cycle_id": null,
+     "gate_decisions": null,
+     "injected_lesson_ids": null,
+     "judge_attestation": null,
+     "parked_phase": null,
+     "parked_question": null,
+     "parked_plan": null,
+     "parked_at": null,
+     "resolution": null,
+     "resolved_at": null,
+     "builder_conversation_id": null,
+     "summary": null,
+     "branch": "improve/qa-handoff",
+     "pr_url": null,
+     "sources": [],
+     "reviews": [],
+     "soul_suggestions": [],
+     "error": "qa-runtime-one ran out of usage mid-change. Its work is handed to the next cycle.",
+     "base_sha": null,
+     "head_sha": null,
+     "merged_at": null,
+     "merge_commit_sha": null,
+     "identity_cost": null,
+     "changed_files": [],
+     "checks": [],
+     "followups": [],
+     "risks": [],
+     "prompt_digest": null,
+     "verdict_rule_version": null,
+     "reaped": false,
+     "created_at": "2026-10-25T10:05:01.820825Z",
+     "updated_at": "2026-10-25T10:05:02.135684Z",
+     "completed_at": "2026-10-25T10:05:02.135682Z"
+    }
+   ],
+   "total": 1
+  }
+ },
+ "F19.handoff-write/no-next-steps": {
+  "request": {
+   "method": "PATCH",
+   "path": "/api/automation/v1/improve/cycles/a5ab75a2-8627-4dcf-9e46-2330a73c3334",
+   "query": []
+  },
+  "status": 200,
+  "body": {
+   "id": "a5ab75a2-8627-4dcf-9e46-2330a73c3334",
+   "automation_id": "04c4aa77-92a1-4626-8931-a98f0378abb5",
+   "run_id": null,
+   "status": "BUILDING",
+   "verdict": null,
+   "repository": {
+    "label": "qa handoff two",
+    "url": "https://qa.invalid/handoff-two.git",
+    "ref": null,
+    "index": 1,
+    "remote_id": null
+   },
+   "builder_profile_id": "11111111-1111-4111-8111-111111111111",
+   "builder_runtime": "qa-runtime-one",
+   "runtime_switches": null,
+   "change_class": null,
+   "claimed_change_class": null,
+   "change_evidence": null,
+   "handoff": null,
+   "resumed_from_cycle_id": null,
+   "resumed_by_cycle_id": null,
+   "gate_decisions": null,
+   "injected_lesson_ids": null,
+   "judge_attestation": null,
+   "parked_phase": null,
+   "parked_question": null,
+   "parked_plan": null,
+   "parked_at": null,
+   "resolution": null,
+   "resolved_at": null,
+   "builder_conversation_id": null,
+   "summary": null,
+   "branch": null,
+   "pr_url": null,
+   "sources": [],
+   "reviews": [],
+   "soul_suggestions": [],
+   "error": null,
+   "base_sha": null,
+   "head_sha": null,
+   "merged_at": null,
+   "merge_commit_sha": null,
+   "identity_cost": null,
+   "changed_files": [],
+   "checks": [],
+   "followups": [],
+   "risks": [],
+   "prompt_digest": null,
+   "verdict_rule_version": null,
+   "reaped": false,
+   "created_at": "2026-10-25T10:05:02.853245Z",
+   "updated_at": "2026-10-25T10:05:03.232965Z",
+   "completed_at": null
+  }
+ },
+ "F19.handoff-resume/claim": {
+  "request": {
+   "method": "POST",
+   "path": "/api/automation/v1/improve/04c4aa77-92a1-4626-8931-a98f0378abb5/claim",
+   "query": []
+  },
+  "status": 201,
+  "body": {
+   "cycle": {
+    "id": "85793cbd-16b5-4ff6-9d47-d80b8f47cdcb",
+    "automation_id": "04c4aa77-92a1-4626-8931-a98f0378abb5",
+    "run_id": null,
+    "status": "CLAIMED",
+    "verdict": null,
+    "repository": {
+     "label": "qa handoff one",
+     "url": "https://qa.invalid/handoff-one.git",
+     "ref": null,
+     "index": 0,
+     "remote_id": null
+    },
+    "builder_profile_id": "11111111-1111-4111-8111-111111111111",
+    "builder_runtime": null,
+    "runtime_switches": null,
+    "change_class": null,
+    "claimed_change_class": null,
+    "change_evidence": null,
+    "handoff": null,
+    "resumed_from_cycle_id": "e54f10d0-1685-417a-8845-e0cb0263429e",
+    "resumed_by_cycle_id": null,
+    "gate_decisions": null,
+    "injected_lesson_ids": null,
+    "judge_attestation": null,
+    "parked_phase": null,
+    "parked_question": null,
+    "parked_plan": null,
+    "parked_at": null,
+    "resolution": null,
+    "resolved_at": null,
+    "builder_conversation_id": null,
+    "summary": null,
+    "branch": null,
+    "pr_url": null,
+    "sources": [],
+    "reviews": [],
+    "soul_suggestions": [],
+    "error": null,
+    "base_sha": null,
+    "head_sha": null,
+    "merged_at": null,
+    "merge_commit_sha": null,
+    "identity_cost": null,
+    "changed_files": [],
+    "checks": [],
+    "followups": [],
+    "risks": [],
+    "prompt_digest": null,
+    "verdict_rule_version": null,
+    "reaped": false,
+    "created_at": "2026-10-25T10:05:03.635483Z",
+    "updated_at": "2026-10-25T10:05:03.639172Z",
+    "completed_at": null
+   },
+   "config": {
+    "builder_profile_id": "11111111-1111-4111-8111-111111111111",
+    "rotate_builder": [],
+    "reviewer_profile_ids": [],
+    "merge_when_authorised": true,
+    "judge_profile_id": null,
+    "repository_source": "explicit",
+    "repositories": [
+     {
+      "label": "qa handoff one",
+      "url": "https://qa.invalid/handoff-one.git",
+      "ref": null
+     },
+     {
+      "label": "qa handoff two",
+      "url": "https://qa.invalid/handoff-two.git",
+      "ref": null
+     }
+    ],
+    "repository_labels": [],
+    "branch_prefix": "improve/",
+    "max_changed_files": 20,
+    "open_pr": true,
+    "focus": null,
+    "daily_cycles_per_repository": null
+   },
+   "rotation": [
+    {
+     "label": "qa handoff one",
+     "url": "https://qa.invalid/handoff-one.git",
+     "ref": null,
+     "index": 0,
+     "remote_id": null
+    },
+    {
+     "label": "qa handoff two",
+     "url": "https://qa.invalid/handoff-two.git",
+     "ref": null,
+     "index": 1,
+     "remote_id": null
+    }
+   ],
+   "resume": {
+    "from_cycle_id": "e54f10d0-1685-417a-8845-e0cb0263429e",
+    "reason": "runtime_exhausted",
+    "branch": "improve/qa-handoff",
+    "branch_pushed": true,
+    "head_sha": "c0ffee1c0ffee1c0ffee1c0ffee1c0ffee1c0ffe",
+    "stage": "implementing",
+    "goal": "Add the missing index to the runs table",
+    "done": [
+     "read the schema"
+    ],
+    "next_steps": [
+     "Write the migration"
+    ],
+    "do_not": [
+     "do not add a second index on the same column"
+    ],
+    "files_touched": [
+     "migrations/versions/036.py"
+    ],
+    "written_by": "qa-runtime-one"
+   }
+  }
+ },
+ "F19.handoff-resume/chain": {
+  "request": {
+   "method": "GET",
+   "path": "/api/automation/v1/improve/04c4aa77-92a1-4626-8931-a98f0378abb5/cycles",
+   "query": []
+  },
+  "status": 200,
+  "body": {
+   "cycles": [
+    {
+     "id": "85793cbd-16b5-4ff6-9d47-d80b8f47cdcb",
+     "automation_id": "04c4aa77-92a1-4626-8931-a98f0378abb5",
+     "run_id": null,
+     "status": "CLAIMED",
+     "verdict": null,
+     "repository": {
+      "label": "qa handoff one",
+      "url": "https://qa.invalid/handoff-one.git",
+      "ref": null,
+      "index": 0,
+      "remote_id": null
+     },
+     "builder_profile_id": "11111111-1111-4111-8111-111111111111",
+     "builder_runtime": null,
+     "runtime_switches": null,
+     "change_class": null,
+     "claimed_change_class": null,
+     "change_evidence": null,
+     "handoff": null,
+     "resumed_from_cycle_id": "e54f10d0-1685-417a-8845-e0cb0263429e",
+     "resumed_by_cycle_id": null,
+     "gate_decisions": null,
+     "injected_lesson_ids": null,
+     "judge_attestation": null,
+     "parked_phase": null,
+     "parked_question": null,
+     "parked_plan": null,
+     "parked_at": null,
+     "resolution": null,
+     "resolved_at": null,
+     "builder_conversation_id": null,
+     "summary": null,
+     "branch": null,
+     "pr_url": null,
+     "sources": [],
+     "reviews": [],
+     "soul_suggestions": [],
+     "error": null,
+     "base_sha": null,
+     "head_sha": null,
+     "merged_at": null,
+     "merge_commit_sha": null,
+     "identity_cost": null,
+     "changed_files": [],
+     "checks": [],
+     "followups": [],
+     "risks": [],
+     "prompt_digest": null,
+     "verdict_rule_version": null,
+     "reaped": false,
+     "created_at": "2026-10-25T10:05:03.635483Z",
+     "updated_at": "2026-10-25T10:05:03.639172Z",
+     "completed_at": null
+    },
+    {
+     "id": "a5ab75a2-8627-4dcf-9e46-2330a73c3334",
+     "automation_id": "04c4aa77-92a1-4626-8931-a98f0378abb5",
+     "run_id": null,
+     "status": "BUILDING",
+     "verdict": null,
+     "repository": {
+      "label": "qa handoff two",
+      "url": "https://qa.invalid/handoff-two.git",
+      "ref": null,
+      "index": 1,
+      "remote_id": null
+     },
+     "builder_profile_id": "11111111-1111-4111-8111-111111111111",
+     "builder_runtime": "qa-runtime-one",
+     "runtime_switches": null,
+     "change_class": null,
+     "claimed_change_class": null,
+     "change_evidence": null,
+     "handoff": null,
+     "resumed_from_cycle_id": null,
+     "resumed_by_cycle_id": null,
+     "gate_decisions": null,
+     "injected_lesson_ids": null,
+     "judge_attestation": null,
+     "parked_phase": null,
+     "parked_question": null,
+     "parked_plan": null,
+     "parked_at": null,
+     "resolution": null,
+     "resolved_at": null,
+     "builder_conversation_id": null,
+     "summary": null,
+     "branch": null,
+     "pr_url": null,
+     "sources": [],
+     "reviews": [],
+     "soul_suggestions": [],
+     "error": null,
+     "base_sha": null,
+     "head_sha": null,
+     "merged_at": null,
+     "merge_commit_sha": null,
+     "identity_cost": null,
+     "changed_files": [],
+     "checks": [],
+     "followups": [],
+     "risks": [],
+     "prompt_digest": null,
+     "verdict_rule_version": null,
+     "reaped": false,
+     "created_at": "2026-10-25T10:05:02.853245Z",
+     "updated_at": "2026-10-25T10:05:03.232965Z",
+     "completed_at": null
+    },
+    {
+     "id": "e54f10d0-1685-417a-8845-e0cb0263429e",
+     "automation_id": "04c4aa77-92a1-4626-8931-a98f0378abb5",
+     "run_id": null,
+     "status": "FAILED",
+     "verdict": null,
+     "repository": {
+      "label": "qa handoff one",
+      "url": "https://qa.invalid/handoff-one.git",
+      "ref": null,
+      "index": 0,
+      "remote_id": null
+     },
+     "builder_profile_id": "11111111-1111-4111-8111-111111111111",
+     "builder_runtime": "qa-runtime-one",
+     "runtime_switches": null,
+     "change_class": null,
+     "claimed_change_class": null,
+     "change_evidence": null,
+     "handoff": {
+      "schema_version": 1,
+      "status": "incomplete",
+      "reason": "runtime_exhausted",
+      "branch": "improve/qa-handoff",
+      "branch_pushed": true,
+      "head_sha": "c0ffee1c0ffee1c0ffee1c0ffee1c0ffee1c0ffe",
+      "stage": "implementing",
+      "goal": "Add the missing index to the runs table",
+      "done": [
+       "read the schema"
+      ],
+      "next_steps": [
+       "Write the migration"
+      ],
+      "do_not": [
+       "do not add a second index on the same column"
+      ],
+      "files_touched": [
+       "migrations/versions/036.py"
+      ],
+      "long_form_path": ".improve-cycle/handoff.md",
+      "written_by": "qa-runtime-one",
+      "written_at": "2026-10-25T10:05:02.135630+00:00"
+     },
+     "resumed_from_cycle_id": null,
+     "resumed_by_cycle_id": "85793cbd-16b5-4ff6-9d47-d80b8f47cdcb",
+     "gate_decisions": null,
+     "injected_lesson_ids": null,
+     "judge_attestation": null,
+     "parked_phase": null,
+     "parked_question": null,
+     "parked_plan": null,
+     "parked_at": null,
+     "resolution": null,
+     "resolved_at": null,
+     "builder_conversation_id": null,
+     "summary": null,
+     "branch": "improve/qa-handoff",
+     "pr_url": null,
+     "sources": [],
+     "reviews": [],
+     "soul_suggestions": [],
+     "error": "qa-runtime-one ran out of usage mid-change. Its work is handed to the next cycle.",
+     "base_sha": null,
+     "head_sha": null,
+     "merged_at": null,
+     "merge_commit_sha": null,
+     "identity_cost": null,
+     "changed_files": [],
+     "checks": [],
+     "followups": [],
+     "risks": [],
+     "prompt_digest": null,
+     "verdict_rule_version": null,
+     "reaped": false,
+     "created_at": "2026-10-25T10:05:01.820825Z",
+     "updated_at": "2026-10-25T10:05:03.640633Z",
+     "completed_at": "2026-10-25T10:05:02.135682Z"
+    }
+   ],
+   "total": 3
+  }
+ },
+ "F19.handoff-unpushed/stored": {
+  "request": {
+   "method": "PATCH",
+   "path": "/api/automation/v1/improve/cycles/85793cbd-16b5-4ff6-9d47-d80b8f47cdcb",
+   "query": []
+  },
+  "status": 200,
+  "body": {
+   "id": "85793cbd-16b5-4ff6-9d47-d80b8f47cdcb",
+   "automation_id": "04c4aa77-92a1-4626-8931-a98f0378abb5",
+   "run_id": null,
+   "status": "FAILED",
+   "verdict": null,
+   "repository": {
+    "label": "qa handoff one",
+    "url": "https://qa.invalid/handoff-one.git",
+    "ref": null,
+    "index": 0,
+    "remote_id": null
+   },
+   "builder_profile_id": "11111111-1111-4111-8111-111111111111",
+   "builder_runtime": "qa-runtime-two",
+   "runtime_switches": null,
+   "change_class": null,
+   "claimed_change_class": null,
+   "change_evidence": null,
+   "handoff": {
+    "schema_version": 1,
+    "status": "incomplete",
+    "reason": "timed_out",
+    "branch": null,
+    "branch_pushed": false,
+    "head_sha": null,
+    "stage": "implementing",
+    "goal": "Finish the migration the last cycle started",
+    "done": [
+     "wrote the migration"
+    ],
+    "next_steps": [
+     "Redo the work from the plan below: the previous attempt was never pushed, so its commits are gone.",
+     "Run the migration against SQLite"
+    ],
+    "do_not": [
+     "do not reuse the 035 revision id"
+    ],
+    "files_touched": [],
+    "long_form_path": ".improve-cycle/handoff.md",
+    "written_by": "qa-runtime-two",
+    "written_at": "2026-10-25T10:05:04.388635+00:00"
+   },
+   "resumed_from_cycle_id": "e54f10d0-1685-417a-8845-e0cb0263429e",
+   "resumed_by_cycle_id": null,
+   "gate_decisions": null,
+   "injected_lesson_ids": null,
+   "judge_attestation": null,
+   "parked_phase": null,
+   "parked_question": null,
+   "parked_plan": null,
+   "parked_at": null,
+   "resolution": null,
+   "resolved_at": null,
+   "builder_conversation_id": null,
+   "summary": null,
+   "branch": null,
+   "pr_url": null,
+   "sources": [],
+   "reviews": [],
+   "soul_suggestions": [],
+   "error": "qa-runtime-two ran out of time mid-change.",
+   "base_sha": null,
+   "head_sha": null,
+   "merged_at": null,
+   "merge_commit_sha": null,
+   "identity_cost": null,
+   "changed_files": [],
+   "checks": [],
+   "followups": [],
+   "risks": [],
+   "prompt_digest": null,
+   "verdict_rule_version": null,
+   "reaped": false,
+   "created_at": "2026-10-25T10:05:03.635483Z",
+   "updated_at": "2026-10-25T10:05:04.388683Z",
+   "completed_at": "2026-10-25T10:05:04.388681Z"
+  }
+ },
+ "F19.handoff-unpushed/resume": {
+  "request": {
+   "method": "POST",
+   "path": "/api/automation/v1/improve/04c4aa77-92a1-4626-8931-a98f0378abb5/claim",
+   "query": []
+  },
+  "status": 201,
+  "body": {
+   "cycle": {
+    "id": "1b5c02d8-9082-44f5-b341-40c64905c924",
+    "automation_id": "04c4aa77-92a1-4626-8931-a98f0378abb5",
+    "run_id": null,
+    "status": "CLAIMED",
+    "verdict": null,
+    "repository": {
+     "label": "qa handoff one",
+     "url": "https://qa.invalid/handoff-one.git",
+     "ref": null,
+     "index": 0,
+     "remote_id": null
+    },
+    "builder_profile_id": "11111111-1111-4111-8111-111111111111",
+    "builder_runtime": null,
+    "runtime_switches": null,
+    "change_class": null,
+    "claimed_change_class": null,
+    "change_evidence": null,
+    "handoff": null,
+    "resumed_from_cycle_id": "85793cbd-16b5-4ff6-9d47-d80b8f47cdcb",
+    "resumed_by_cycle_id": null,
+    "gate_decisions": null,
+    "injected_lesson_ids": null,
+    "judge_attestation": null,
+    "parked_phase": null,
+    "parked_question": null,
+    "parked_plan": null,
+    "parked_at": null,
+    "resolution": null,
+    "resolved_at": null,
+    "builder_conversation_id": null,
+    "summary": null,
+    "branch": null,
+    "pr_url": null,
+    "sources": [],
+    "reviews": [],
+    "soul_suggestions": [],
+    "error": null,
+    "base_sha": null,
+    "head_sha": null,
+    "merged_at": null,
+    "merge_commit_sha": null,
+    "identity_cost": null,
+    "changed_files": [],
+    "checks": [],
+    "followups": [],
+    "risks": [],
+    "prompt_digest": null,
+    "verdict_rule_version": null,
+    "reaped": false,
+    "created_at": "2026-10-25T10:05:05.175481Z",
+    "updated_at": "2026-10-25T10:05:05.177059Z",
+    "completed_at": null
+   },
+   "config": {
+    "builder_profile_id": "11111111-1111-4111-8111-111111111111",
+    "rotate_builder": [],
+    "reviewer_profile_ids": [],
+    "merge_when_authorised": true,
+    "judge_profile_id": null,
+    "repository_source": "explicit",
+    "repositories": [
+     {
+      "label": "qa handoff one",
+      "url": "https://qa.invalid/handoff-one.git",
+      "ref": null
+     },
+     {
+      "label": "qa handoff two",
+      "url": "https://qa.invalid/handoff-two.git",
+      "ref": null
+     }
+    ],
+    "repository_labels": [],
+    "branch_prefix": "improve/",
+    "max_changed_files": 20,
+    "open_pr": true,
+    "focus": null,
+    "daily_cycles_per_repository": null
+   },
+   "rotation": [
+    {
+     "label": "qa handoff one",
+     "url": "https://qa.invalid/handoff-one.git",
+     "ref": null,
+     "index": 0,
+     "remote_id": null
+    },
+    {
+     "label": "qa handoff two",
+     "url": "https://qa.invalid/handoff-two.git",
+     "ref": null,
+     "index": 1,
+     "remote_id": null
+    }
+   ],
+   "resume": {
+    "from_cycle_id": "85793cbd-16b5-4ff6-9d47-d80b8f47cdcb",
+    "reason": "timed_out",
+    "branch": null,
+    "branch_pushed": false,
+    "head_sha": null,
+    "stage": "implementing",
+    "goal": "Finish the migration the last cycle started",
+    "done": [
+     "wrote the migration"
+    ],
+    "next_steps": [
+     "Redo the work from the plan below: the previous attempt was never pushed, so its commits are gone.",
+     "Run the migration against SQLite"
+    ],
+    "do_not": [
+     "do not reuse the 035 revision id"
+    ],
+    "files_touched": [],
+    "written_by": "qa-runtime-two"
+   }
+  }
+ },
+ "F19.handoff-faults/waiting-and-unsaved": {
+  "request": {
+   "method": "GET",
+   "path": "/api/automation/v1/improve/builder-share",
+   "query": [
+    [
+     "days",
+     "1"
+    ],
+    [
+     "automation_id",
+     "04c4aa77-92a1-4626-8931-a98f0378abb5"
+    ]
+   ]
+  },
+  "status": 200,
+  "body": {
+   "automation_id": "04c4aa77-92a1-4626-8931-a98f0378abb5",
+   "configured_builders": 1,
+   "window_days": 1,
+   "since": "2026-10-24T10:05:05.992080Z",
+   "days_covered": 1,
+   "cycles": 4,
+   "runtimes": [
+    {
+     "runtime": "qa-runtime-one",
+     "cycles": 2,
+     "share": 0.5
+    },
+    {
+     "runtime": "qa-runtime-two",
+     "cycles": 2,
+     "share": 0.5
+    }
+   ],
+   "evenness_gap": 0.0,
+   "target_gap": 20.0,
+   "within_target": true,
+   "unattributed_cycles": 0,
+   "misattributed_cycles": 0,
+   "work_redone": 0,
+   "handoffs_waiting": 1,
+   "handoffs_unsaved": 1
+  }
+ },
+ "F19.handoff-faults/orphaned-claim": {
+  "request": {
+   "method": "POST",
+   "path": "/api/automation/v1/improve/e104b6e6-1ed0-49e1-a5b4-6a73842e6439/claim",
+   "query": []
+  },
+  "status": 201,
+  "body": {
+   "cycle": {
+    "id": "1464565e-96ac-40f6-b3d5-2f4efc8140ac",
+    "automation_id": "e104b6e6-1ed0-49e1-a5b4-6a73842e6439",
+    "run_id": null,
+    "status": "CLAIMED",
+    "verdict": null,
+    "repository": {
+     "label": "qa redone renamed",
+     "url": "https://qa.invalid/redone.git",
+     "ref": null,
+     "index": 0,
+     "remote_id": null
+    },
+    "builder_profile_id": "11111111-1111-4111-8111-111111111111",
+    "builder_runtime": null,
+    "runtime_switches": null,
+    "change_class": null,
+    "claimed_change_class": null,
+    "change_evidence": null,
+    "handoff": null,
+    "resumed_from_cycle_id": null,
+    "resumed_by_cycle_id": null,
+    "gate_decisions": null,
+    "injected_lesson_ids": null,
+    "judge_attestation": null,
+    "parked_phase": null,
+    "parked_question": null,
+    "parked_plan": null,
+    "parked_at": null,
+    "resolution": null,
+    "resolved_at": null,
+    "builder_conversation_id": null,
+    "summary": null,
+    "branch": null,
+    "pr_url": null,
+    "sources": [],
+    "reviews": [],
+    "soul_suggestions": [],
+    "error": null,
+    "base_sha": null,
+    "head_sha": null,
+    "merged_at": null,
+    "merge_commit_sha": null,
+    "identity_cost": null,
+    "changed_files": [],
+    "checks": [],
+    "followups": [],
+    "risks": [],
+    "prompt_digest": null,
+    "verdict_rule_version": null,
+    "reaped": false,
+    "created_at": "2026-10-25T10:05:08.390503Z",
+    "updated_at": "2026-10-25T10:05:08.390504Z",
+    "completed_at": null
+   },
+   "config": {
+    "builder_profile_id": "11111111-1111-4111-8111-111111111111",
+    "rotate_builder": [],
+    "reviewer_profile_ids": [],
+    "merge_when_authorised": true,
+    "judge_profile_id": null,
+    "repository_source": "explicit",
+    "repositories": [
+     {
+      "label": "qa redone renamed",
+      "url": "https://qa.invalid/redone.git",
+      "ref": null
+     }
+    ],
+    "repository_labels": [],
+    "branch_prefix": "improve/",
+    "max_changed_files": 20,
+    "open_pr": true,
+    "focus": null,
+    "daily_cycles_per_repository": null
+   },
+   "rotation": [
+    {
+     "label": "qa redone renamed",
+     "url": "https://qa.invalid/redone.git",
+     "ref": null,
+     "index": 0,
+     "remote_id": null
+    }
+   ],
+   "resume": null
+  }
+ },
+ "F19.handoff-faults/work-redone": {
+  "request": {
+   "method": "GET",
+   "path": "/api/automation/v1/improve/builder-share",
+   "query": [
+    [
+     "days",
+     "1"
+    ],
+    [
+     "automation_id",
+     "e104b6e6-1ed0-49e1-a5b4-6a73842e6439"
+    ]
+   ]
+  },
+  "status": 200,
+  "body": {
+   "automation_id": "e104b6e6-1ed0-49e1-a5b4-6a73842e6439",
+   "configured_builders": 1,
+   "window_days": 1,
+   "since": "2026-10-24T10:05:08.921733Z",
+   "days_covered": 1,
+   "cycles": 1,
+   "runtimes": [
+    {
+     "runtime": "qa-runtime-one",
+     "cycles": 1,
+     "share": 1.0
+    }
+   ],
+   "evenness_gap": 0.0,
+   "target_gap": 20.0,
+   "within_target": true,
+   "unattributed_cycles": 0,
+   "misattributed_cycles": 0,
+   "work_redone": 1,
+   "handoffs_waiting": 0,
+   "handoffs_unsaved": 0
+  }
+ },
+ "F19.attribution-faults/misattributed": {
+  "request": {
+   "method": "PATCH",
+   "path": "/api/automation/v1/improve/cycles/754b7f1e-b47d-4c52-9cf5-e9622cd05764",
+   "query": []
+  },
+  "status": 200,
+  "body": {
+   "id": "754b7f1e-b47d-4c52-9cf5-e9622cd05764",
+   "automation_id": "b29f46a2-a79d-43b3-a411-a7d087c43fc7",
+   "run_id": null,
+   "status": "REVIEWING",
+   "verdict": null,
+   "repository": {
+    "label": "qa attribution one",
+    "url": "https://qa.invalid/attr-one.git",
+    "ref": null,
+    "index": 0,
+    "remote_id": null
+   },
+   "builder_profile_id": "11111111-1111-4111-8111-111111111111",
+   "builder_runtime": "qa-runtime-one",
+   "runtime_switches": [
+    {
+     "from": "qa-runtime-one",
+     "to": "qa-runtime-two",
+     "why": "usage_exhausted"
+    }
+   ],
+   "change_class": null,
+   "claimed_change_class": null,
+   "change_evidence": null,
+   "handoff": null,
+   "resumed_from_cycle_id": null,
+   "resumed_by_cycle_id": null,
+   "gate_decisions": null,
+   "injected_lesson_ids": null,
+   "judge_attestation": null,
+   "parked_phase": null,
+   "parked_question": null,
+   "parked_plan": null,
+   "parked_at": null,
+   "resolution": null,
+   "resolved_at": null,
+   "builder_conversation_id": null,
+   "summary": "failed over mid-change and finished elsewhere",
+   "branch": null,
+   "pr_url": null,
+   "sources": [],
+   "reviews": [],
+   "soul_suggestions": [],
+   "error": null,
+   "base_sha": null,
+   "head_sha": null,
+   "merged_at": null,
+   "merge_commit_sha": null,
+   "identity_cost": null,
+   "changed_files": [],
+   "checks": [],
+   "followups": [],
+   "risks": [],
+   "prompt_digest": null,
+   "verdict_rule_version": null,
+   "reaped": false,
+   "created_at": "2026-10-25T10:05:09.638573Z",
+   "updated_at": "2026-10-25T10:05:10.037559Z",
+   "completed_at": null
+  }
+ },
+ "F19.attribution-faults/unattributed": {
+  "request": {
+   "method": "PATCH",
+   "path": "/api/automation/v1/improve/cycles/a39699b4-a57c-418f-b9a4-de465dd83967",
+   "query": []
+  },
+  "status": 200,
+  "body": {
+   "id": "a39699b4-a57c-418f-b9a4-de465dd83967",
+   "automation_id": "b29f46a2-a79d-43b3-a411-a7d087c43fc7",
+   "run_id": null,
+   "status": "REVIEWING",
+   "verdict": null,
+   "repository": {
+    "label": "qa attribution two",
+    "url": "https://qa.invalid/attr-two.git",
+    "ref": null,
+    "index": 1,
+    "remote_id": null
+   },
+   "builder_profile_id": "11111111-1111-4111-8111-111111111111",
+   "builder_runtime": "custom",
+   "runtime_switches": null,
+   "change_class": null,
+   "claimed_change_class": null,
+   "change_evidence": null,
+   "handoff": null,
+   "resumed_from_cycle_id": null,
+   "resumed_by_cycle_id": null,
+   "gate_decisions": null,
+   "injected_lesson_ids": null,
+   "judge_attestation": null,
+   "parked_phase": null,
+   "parked_question": null,
+   "parked_plan": null,
+   "parked_at": null,
+   "resolution": null,
+   "resolved_at": null,
+   "builder_conversation_id": null,
+   "summary": "a profile with its own launch command",
+   "branch": null,
+   "pr_url": null,
+   "sources": [],
+   "reviews": [],
+   "soul_suggestions": [],
+   "error": null,
+   "base_sha": null,
+   "head_sha": null,
+   "merged_at": null,
+   "merge_commit_sha": null,
+   "identity_cost": null,
+   "changed_files": [],
+   "checks": [],
+   "followups": [],
+   "risks": [],
+   "prompt_digest": null,
+   "verdict_rule_version": null,
+   "reaped": false,
+   "created_at": "2026-10-25T10:05:10.416105Z",
+   "updated_at": "2026-10-25T10:05:10.779491Z",
+   "completed_at": null
+  }
+ },
+ "F19.attribution-faults/counted": {
+  "request": {
+   "method": "GET",
+   "path": "/api/automation/v1/improve/builder-share",
+   "query": [
+    [
+     "days",
+     "1"
+    ],
+    [
+     "automation_id",
+     "b29f46a2-a79d-43b3-a411-a7d087c43fc7"
+    ]
+   ]
+  },
+  "status": 200,
+  "body": {
+   "automation_id": "b29f46a2-a79d-43b3-a411-a7d087c43fc7",
+   "configured_builders": 1,
+   "window_days": 1,
+   "since": "2026-10-24T10:05:11.125244Z",
+   "days_covered": 1,
+   "cycles": 1,
+   "runtimes": [
+    {
+     "runtime": "qa-runtime-one",
+     "cycles": 1,
+     "share": 1.0
+    }
+   ],
+   "evenness_gap": 0.0,
+   "target_gap": 20.0,
+   "within_target": true,
+   "unattributed_cycles": 1,
+   "misattributed_cycles": 1,
+   "work_redone": 0,
+   "handoffs_waiting": 0,
+   "handoffs_unsaved": 0
+  }
+ }
+}
