@@ -64,13 +64,29 @@ IDENTITY_DOCUMENT_BUDGET = {
 }
 
 #: Human titles for the identity documents, in load order.
+#: Each title names the document's **full** path, not its filename.
+#:
+#: The user's memory and the repository's are both called MEMORY.md, and the
+#: builder is told to append a rejected approach to the repository's one while
+#: holding the user's in its prompt. A heading that said only "MEMORY.md"
+#: left the two indistinguishable by name, which is the one confusion whose
+#: cost is the user's personal continuity log committed into a repository.
 IDENTITY_DOCUMENT_TITLES = [
-    ("soul", "Who the user is (SOUL.md)"),
-    ("style", "How the user writes and works (STYLE.md)"),
-    ("memory", "What has already been learned (MEMORY.md)"),
-    ("good-outputs", "Work that sounds like them (examples/good-outputs.md)"),
-    ("bad-outputs", "Work that does not (examples/bad-outputs.md)"),
-    ("influences", "What shaped their thinking (data/influences.md)"),
+    ("soul", "Who the user is (~/.openhands/soul/SOUL.md)"),
+    ("style", "How the user writes and works (~/.openhands/soul/STYLE.md)"),
+    ("memory", "What has already been learned (~/.openhands/soul/MEMORY.md)"),
+    (
+        "good-outputs",
+        "Work that sounds like them (~/.openhands/soul/examples/good-outputs.md)",
+    ),
+    (
+        "bad-outputs",
+        "Work that does not (~/.openhands/soul/examples/bad-outputs.md)",
+    ),
+    (
+        "influences",
+        "What shaped their thinking (~/.openhands/soul/data/influences.md)",
+    ),
 ]
 
 #: What the repository's whole identity set may take of a cycle's prompt.

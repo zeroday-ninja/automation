@@ -84,6 +84,13 @@ cycle. Report it with the sources and change nothing.
   has none. That file is the only thing stopping the next cycle spending its
   whole budget rediscovering the dead end you just left. Write what you tried,
   what happened, and what you would need for it to work.
+- **That file is the repository's, and it is the only MEMORY.md you write.**
+  The user's own `~/.openhands/soul/MEMORY.md` is quoted to you above and is
+  theirs: it is their continuity across every project, it is synced between
+  their machines, and it never goes into a repository. Do not copy it, quote
+  it, summarise it or commit it anywhere in this clone — not into the
+  project's MEMORY.md, not into a commit message, and not into your report.
+  The same goes for every other document under `~/.openhands/soul/`.
 
 ## Step 5 — Publish it for review
 
