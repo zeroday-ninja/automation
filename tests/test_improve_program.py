@@ -2676,6 +2676,43 @@ class TestCorrectionsBecomeLessons:
         ]
         assert subjects == ["url:github.com/acme/shared"]
 
+    async def test_an_adapters_own_incident_is_a_lesson_nobody_had_to_give(
+        self, async_client
+    ):
+        """The system's observation about itself files like a correction: once,
+        against the runtime, and a second sighting is a repeat with a diagnosis
+        rather than a second lesson."""
+        text = (
+            "The antigravity adapter met a step it does not understand: "
+            "'review_note'. Handle it or ignore it deliberately."
+        )
+        first = await async_client.post(
+            self.LESSONS,
+            json={
+                "scope": "runtime",
+                "subject": "antigravity",
+                "trigger": "adapter_incident",
+                "text": text,
+                "source": {"conversation_id": "c1", "what": "step"},
+            },
+        )
+        again = await async_client.post(
+            self.LESSONS,
+            json={
+                "scope": "runtime",
+                "subject": "antigravity",
+                "trigger": "adapter_incident",
+                "text": text,
+                "source": {"conversation_id": "c2", "what": "step"},
+            },
+        )
+
+        assert first.status_code == 201, first.text
+        assert first.json()["lesson"]["trigger"] == "adapter_incident"
+        assert first.json()["repeat"] is False
+        assert again.json()["repeat"] is True
+        assert again.json()["lesson"]["id"] == first.json()["lesson"]["id"]
+
     async def test_a_cycle_is_told_the_repositorys_identity_to_match_on(
         self, async_client
     ):

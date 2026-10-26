@@ -19,6 +19,7 @@ from openhands.automation.improve.lessons import (
     diagnose_repeat,
     lessons_in_scope,
     lessons_section,
+    normalize_trigger,
     resolution_is_a_correction,
     similarity,
 )
@@ -274,6 +275,15 @@ class TestRendering:
 
     def test_no_corrections_renders_nothing(self):
         assert lessons_section([], 4000) == ""
+
+
+class TestWhatProducesACorrection:
+    def test_an_adapters_incident_is_a_trigger_the_system_raises_itself(self):
+        # Every other trigger is something a person did. This one is the
+        # runtime's own report, and it is a trigger so it files the same way.
+        assert normalize_trigger("adapter_incident") == "adapter_incident"
+        assert normalize_trigger(" Adapter_Incident ") == "adapter_incident"
+        assert normalize_trigger("adapter_feeling") is None
 
 
 class TestWhatCountsAsACorrection:
