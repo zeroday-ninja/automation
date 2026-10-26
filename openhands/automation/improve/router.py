@@ -220,6 +220,25 @@ def _resolved_route(cycle: AutomationImproveCycle) -> str | None:
     return None
 
 
+def _person_insisted(cycle: AutomationImproveCycle) -> bool:
+    """Whether a person has said `approve` to this cycle more than once.
+
+    The second time comes after a run reported it could not publish and named
+    the failing check as the new question, so the person answered knowing the
+    objection. The gate log is the record of who decided what, which makes it
+    the record of how many times.
+    """
+    approvals = 0
+    for decision in cycle.gate_decisions or []:
+        if not isinstance(decision, dict):
+            continue
+        if decision.get("route") == "approve" and str(
+            decision.get("decided_by") or ""
+        ).startswith("user:"):
+            approvals += 1
+    return approvals >= 2
+
+
 async def _resume_for(
     session: AsyncSession, cycle: AutomationImproveCycle
 ) -> HandoffResume | None:
@@ -1122,6 +1141,7 @@ async def get_cycle_authority(
         builder_runtime=cycle.builder_runtime,
         judge_attestation=cycle.judge_attestation,
         resolved_route=_resolved_route(cycle),
+        person_insisted=_person_insisted(cycle),
     )
     return AuthorityResponse(
         cycle_id=cycle.id,

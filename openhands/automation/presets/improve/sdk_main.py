@@ -940,6 +940,8 @@ def publish_resolved_cycle(workspace) -> bool:
                 "gate_decisions": decisions,
                 "parked_question": clamp(
                     f"You said to publish this, and it cannot publish yet: {reason}\n\n"
+                    "Say publish again and it publishes anyway; send it round "
+                    "and the next cycle fixes it first.\n\n"
                     f"{cycle.get('parked_question') or ''}",
                     4000,
                 ),

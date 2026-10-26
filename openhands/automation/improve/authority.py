@@ -159,6 +159,7 @@ def resolve_authority(
     builder_runtime: str | None,
     judge_attestation: dict | None,
     resolved_route: str | None = None,
+    person_insisted: bool = False,
 ) -> Authority:
     """Whether this change may publish now.
 
@@ -173,8 +174,15 @@ def resolve_authority(
     is no longer what decides. Without it, resolving a park could only ever
     produce the same refusal, and "raise, resolve, resume" had no resume.
 
-    The evidence checks below still apply. A person approved the change, not
-    the absence of a passing test.
+    The evidence checks below still apply to a first approval. A person
+    approved the change, not the absence of a passing test -- and on the first
+    answer they had not been shown the test. ``person_insisted`` is a second
+    `approve`, given after the run came back with the failing check named as
+    the new question. That is the person's call to make: the two live cases
+    that produced this were checks the builders had documented as failing
+    identically on main, and refusing a second time was the machine
+    overruling the human on a human-only decision. Missing evidence is still
+    refused -- there is no "anyway" for a change with no commit to merge.
     """
     approved_by_a_person = resolved_route == "approve"
 
@@ -226,7 +234,7 @@ def resolve_authority(
         return Authority(authorised=False, route=route, reason=reason)
 
     failures = _failed_checks(checks)
-    if failures:
+    if failures and not (approved_by_a_person and person_insisted):
         return Authority(
             authorised=False,
             route="cycle",
