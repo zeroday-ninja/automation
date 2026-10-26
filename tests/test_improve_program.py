@@ -2147,6 +2147,76 @@ class TestParkingAndResolving:
         routes = [d["route"] for d in listed[0]["gate_decisions"]]
         assert "approve" in routes
 
+    async def test_saying_publish_a_second_time_publishes(self, async_client):
+        """Told why it cannot publish, the person says publish again -- and it does.
+
+        The first approve over a failed check comes back as a question naming
+        the check. The second approve is informed, and the authority honours
+        it: the gate log holds both approvals, which is how the service knows
+        this is the second.
+        """
+        cycle_id = await self._parked(
+            async_client,
+            "omicron",
+            **{
+                **self.PUBLISHABLE,
+                "checks": [
+                    {"command": "pytest tests/", "passed": True},
+                    {"command": "node --test server/test/*.test.js", "passed": False},
+                ],
+            },
+        )
+        program_id = (
+            await async_client.post(
+                f"/api/automation/v1/improve/cycles/{cycle_id}/resolve",
+                json={"route": "approve", "resolution": "Publish it."},
+            )
+        ).json()["automation_id"]
+        # The run takes it, is refused, and raises it back with the reason.
+        await async_client.post(
+            f"/api/automation/v1/improve/{program_id}/continue", json={}
+        )
+        refused = await async_client.get(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/authority"
+        )
+        await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "status": "PARKED",
+                "parked_question": "You said to publish this, and it cannot "
+                "publish yet: the verification did not pass.",
+                "gate_decisions": [
+                    {
+                        "phase": "publish",
+                        "route": "cycle",
+                        "trigger": "asked the service again",
+                        "rationale": "the verification did not pass",
+                    }
+                ],
+            },
+        )
+
+        # Act: they read the reason and say publish again.
+        again = await async_client.post(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/resolve",
+            json={
+                "route": "approve",
+                "resolution": "That test fails on main too. Publish it.",
+            },
+        )
+        allowed = await async_client.get(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/authority"
+        )
+        offered = await async_client.post(
+            f"/api/automation/v1/improve/{program_id}/continue", json={}
+        )
+
+        # Assert
+        assert refused.json()["authorised"] is False
+        assert again.status_code == 200, again.text
+        assert allowed.json()["authorised"] is True
+        assert offered.json()["cycle"]["id"] == cycle_id
+
     async def test_a_question_is_answered_once(self, async_client):
         # It stays PARKED until a run carries the answer out, so "is it
         # parked" stopped answering "is it waiting" — and a second answer

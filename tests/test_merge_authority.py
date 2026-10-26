@@ -123,6 +123,53 @@ def test_a_persons_approval_outranks_the_reviewer_but_not_the_facts() -> None:
     assert "head_sha" in unshown.missing
 
 
+def test_a_second_approval_publishes_over_a_failed_check_but_not_over_nothing() -> None:
+    """The person's call, once they have been shown the objection.
+
+    A first approve over a failed check is refused and the check is named as
+    the new question. A second approve is given knowing that, and refusing it
+    again is the machine overruling the human on a human-only decision -- the
+    two live cases were checks the builders had documented as failing
+    identically on main. There is still no "anyway" for a change with no
+    commit to merge.
+    """
+    # One passed, one did not -- the live shape. A record with *only* a failed
+    # check is also a record with no evidence the verification ran at all,
+    # which readiness refuses on its own and for a different reason.
+    failing = {
+        **READY,
+        "checks": [
+            {"command": "pytest tests/", "passed": True},
+            {"command": "node --test server/test/*.test.js", "passed": False},
+        ],
+    }
+
+    first = resolve_authority(
+        change_class="breaking",
+        judge_attestation=None,
+        resolved_route="approve",
+        **failing,
+    )
+    second = resolve_authority(
+        change_class="breaking",
+        judge_attestation=None,
+        resolved_route="approve",
+        person_insisted=True,
+        **failing,
+    )
+    nothing = resolve_authority(
+        change_class="breaking",
+        judge_attestation=None,
+        resolved_route="approve",
+        person_insisted=True,
+        **{**failing, "head_sha": None},
+    )
+
+    assert first.authorised is False and first.route == "cycle"
+    assert second.authorised is True and second.route == "approve"
+    assert nothing.authorised is False and "head_sha" in nothing.missing
+
+
 def test_a_deletion_cannot_be_signed_by_an_unknown_author() -> None:
     """The signer is never the author — and "cannot tell" is not "is not".
 
