@@ -45,6 +45,11 @@ LESSON_TRIGGERS: tuple[str, ...] = (
     "comment",
     "chat_instruction",
     "rejected_approach",
+    # An agent runtime's adapter met an event it has no translation for. Not
+    # a person's words but the system's own observation about itself, filed
+    # against the runtime so the cycles that touch it find it — the one
+    # trigger here that nobody had to notice first.
+    "adapter_incident",
 )
 
 #: Which stage of the pipeline failed, when a correction arrives twice.
