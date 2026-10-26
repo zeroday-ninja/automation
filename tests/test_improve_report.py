@@ -335,9 +335,33 @@ class TestChangeoverPlan:
         )
 
         assert plan["breaks"] == [
-            "removed_export in openhands/schemas.py: -class EventEnvelope:"
+            "An export was removed from openhands/schemas.py: -class EventEnvelope:"
         ]
         assert plan["rollback"] == "revert the server commit"
+
+    def test_what_breaks_is_said_in_words_and_an_unknown_rule_keeps_its_name(
+        self, report
+    ):
+        plan = report.changeover_plan(
+            {},
+            [
+                {
+                    "rule": "deletions_above_threshold",
+                    "path": "server/characterize.js",
+                    "detail": "19 lines removed (threshold 10)",
+                },
+                {"rule": "file_deleted", "path": "server/old.js", "detail": "gone"},
+                {"rule": "mystery_rule", "path": "a.py", "detail": "something"},
+            ],
+            "improve/20261024",
+        )
+
+        assert plan["breaks"] == [
+            "More was deleted from server/characterize.js than the threshold "
+            "allows: 19 lines removed (threshold 10)",
+            "server/old.js was deleted",
+            "mystery_rule in a.py: something",
+        ]
 
     def test_an_unreadable_diff_says_so_rather_than_claiming_nothing_breaks(
         self, report
