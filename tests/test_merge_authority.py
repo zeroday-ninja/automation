@@ -84,6 +84,45 @@ def test_an_attested_deletion_from_another_runtime_publishes() -> None:
     assert "codex" in authority.reason
 
 
+def test_a_persons_approval_outranks_the_reviewer_but_not_the_facts() -> None:
+    """What a person's answer to a parked question is allowed to overrule.
+
+    A reviewer's verdict is an opinion: the concerns are on the cycle, the
+    person read them when they were asked, and they said publish. Left in
+    force, their approval was refused once a minute by a review they had
+    already overruled -- observed live against a real approval. A failed
+    check and missing evidence are facts, and a person approving the change
+    did not approve the absence of a passing test.
+    """
+    overruled = resolve_authority(
+        change_class="breaking",
+        judge_attestation=None,
+        resolved_route="approve",
+        **{**READY, "verdict": "CHANGES_REQUESTED"},
+    )
+    assert overruled.authorised is True
+    assert overruled.route == "approve"
+
+    failed = resolve_authority(
+        change_class="breaking",
+        judge_attestation=None,
+        resolved_route="approve",
+        **{**READY, "checks": [{"command": "pytest tests/", "passed": False}]},
+    )
+    assert failed.authorised is False
+    assert failed.route == "cycle"
+    assert "did not pass" in failed.reason
+
+    unshown = resolve_authority(
+        change_class="breaking",
+        judge_attestation=None,
+        resolved_route="approve",
+        **{**READY, "head_sha": None},
+    )
+    assert unshown.authorised is False
+    assert "head_sha" in unshown.missing
+
+
 def test_a_deletion_cannot_be_signed_by_an_unknown_author() -> None:
     """The signer is never the author — and "cannot tell" is not "is not".
 
