@@ -308,6 +308,37 @@ def normalize_removals(raw: object) -> list:
     return removals[:200]
 
 
+# Plain words for what the classifier found. The rule ids belong to the gate
+# log; the person reading the card on the map is not asked to know them, so
+# "removed_export in server/x.js" becomes a sentence. A rule this table does
+# not know keeps the raw form rather than hiding behind a vague one.
+_RULE_WORDS: dict[str, str] = {
+    "removed_export": "An export was removed from {path}: {detail}",
+    "contract_line_removed": (
+        "A line of the wire contract was removed from {path}: {detail}"
+    ),
+    "route_removed": "A route was removed from {path}: {detail}",
+    "migration_drops_data": "A migration in {path} drops data: {detail}",
+    "file_deleted": "{path} was deleted",
+    "deletions_above_threshold": (
+        "More was deleted from {path} than the threshold allows: {detail}"
+    ),
+    "file_renamed": "{path} was renamed; it {detail}",
+    "dependency_major_bump": (
+        "A dependency's major version changed in {path}: {detail}"
+    ),
+}
+
+
+def words_for_reason(entry: dict) -> str:
+    """One sentence for a classifier reason, in the words of the card."""
+    rule, path, detail = entry.get("rule"), entry.get("path"), entry.get("detail")
+    template = _RULE_WORDS.get(str(rule))
+    if template is None:
+        return f"{rule} in {path}: {detail}"
+    return template.format(path=path, detail=detail)
+
+
 def changeover_plan(report: dict, reasons: list | None, branch: str) -> dict:
     """What a person needs in order to answer a breaking change.
 
@@ -318,9 +349,7 @@ def changeover_plan(report: dict, reasons: list | None, branch: str) -> dict:
     a plan with no rollback needed.
     """
     breaks = [
-        f"{entry.get('rule')} in {entry.get('path')}: {entry.get('detail')}"
-        for entry in (reasons or [])
-        if isinstance(entry, dict)
+        words_for_reason(entry) for entry in (reasons or []) if isinstance(entry, dict)
     ][:10]
     plan = {
         "breaks": breaks or ["the diff could not be read"],
