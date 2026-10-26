@@ -666,7 +666,10 @@ _RULE_FLOOR: dict[str, str] = {
     "contract_line_removed": "breaking",
     "route_removed": "breaking",
     "migration_drops_data": "breaking",
-    "dependency_major_bump": "breaking",
+    # Judged, not escalated -- the same reading as `change_class.py`, which
+    # says why. The two copies of this table have to agree or a bump the
+    # classifier calls deleting would be raised back to breaking here.
+    "dependency_major_bump": "deleting",
     "file_deleted": "deleting",
     "deletions_above_threshold": "deleting",
     "file_renamed": "deleting",

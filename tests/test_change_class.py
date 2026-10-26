@@ -178,6 +178,11 @@ def test_changes_that_take_nothing_away_are_additive(label: str, diff: str) -> N
     [
         ("a file with no public surface", DELETED_PRIVATE_FILE, "file_deleted"),
         ("many lines cut from one file", BIG_DELETION, "deletions_above_threshold"),
+        # Judged, not escalated: the person answered three parked bumps in one
+        # evening with "I don't want to deal with dependency bumps, you can
+        # troubleshoot and fix this kind of maintenance". A second runtime
+        # still has to attest it; nobody is asked.
+        ("a dependency major bump", MAJOR_BUMP, "dependency_major_bump"),
     ],
 )
 def test_taking_a_lot_out_is_deleting(label: str, diff: str, rule: str) -> None:
@@ -193,7 +198,6 @@ def test_taking_a_lot_out_is_deleting(label: str, diff: str, rule: str) -> None:
         ("a public function removed", REMOVED_PY_FUNCTION, "removed_export"),
         ("an exported const removed", REMOVED_TS_EXPORT, "removed_export"),
         ("a migration that drops a column", MIGRATION_DROPS, "migration_drops_data"),
-        ("a dependency major bump", MAJOR_BUMP, "dependency_major_bump"),
         # Deleting a file that exported something removes a public promise;
         # only a file with no surface is a mere deletion.
         ("a file that exported something", DELETED_EXPORTING_FILE, "removed_export"),
