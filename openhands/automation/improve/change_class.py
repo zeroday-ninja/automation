@@ -253,9 +253,24 @@ def assess_diff(
         "contract_line_removed",
         "route_removed",
         "migration_drops_data",
+    }
+    # A dependency major bump is judged, not escalated. It used to be
+    # breaking, and every one of them parked and waited for the person -- who
+    # answered three of them in one evening with the same words: "I don't
+    # want to deal with dependency bumps, you can troubleshoot and fix this
+    # kind of maintenance." A captured correction that can be mechanised is
+    # mechanised, so it is a deleting-class change now: a second runtime has
+    # to attest it, with the checks and the review in force, and nobody is
+    # asked. What stays breaking is what the plan names -- a removed public
+    # export, a changed wire contract, a route gone, a migration that drops
+    # data -- because those break somebody else's code rather than the
+    # build's own dependencies.
+    deleting_rules = {
+        "file_deleted",
+        "deletions_above_threshold",
+        "file_renamed",
         "dependency_major_bump",
     }
-    deleting_rules = {"file_deleted", "deletions_above_threshold", "file_renamed"}
     fired = {reason.rule for reason in reasons}
     if fired & breaking_rules:
         change_class = "breaking"
