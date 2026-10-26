@@ -214,7 +214,14 @@ def resolve_authority(
             ),
             missing=("verdict",),
         )
-    if verdict in UNMERGEABLE_VERDICTS:
+    if verdict in UNMERGEABLE_VERDICTS and not approved_by_a_person:
+        # A reviewer's verdict is an opinion, and the one thing a person's
+        # answer is allowed to outrank: the concerns are on the cycle, the
+        # person read them when they were asked, and they said publish. Left
+        # in force here, their approval was refused once a minute by a review
+        # they had already overruled -- observed live. What a person's answer
+        # does *not* outrank is below: a check that failed and evidence that is
+        # missing are facts, not opinions.
         route, reason = UNMERGEABLE_VERDICTS[verdict]
         return Authority(authorised=False, route=route, reason=reason)
 

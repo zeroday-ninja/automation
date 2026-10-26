@@ -2092,6 +2092,61 @@ class TestParkingAndResolving:
         routes = [d["route"] for d in again.json()["gate_decisions"]]
         assert routes == ["escalate", "approve"]
 
+    async def test_an_answer_that_cannot_be_carried_out_comes_back_as_a_question(
+        self, async_client
+    ):
+        """Raise, resolve, cannot resume -- raise again, to the person.
+
+        A run handed the answer could not publish and parked the cycle again
+        still marked answered. So the next run took it a minute later, was
+        refused again, appended the same decision again -- and `/parked` hid
+        it from the one person who could break the loop, because "answered" is
+        what that list filters out. Observed live against a real approval.
+        """
+        cycle_id = await self._parked(async_client, "xi", **self.PUBLISHABLE)
+        resolved = await async_client.post(
+            f"/api/automation/v1/improve/cycles/{cycle_id}/resolve",
+            json={"route": "approve", "resolution": "Publish it."},
+        )
+        program_id = resolved.json()["automation_id"]
+        handed = await async_client.post(
+            f"/api/automation/v1/improve/{program_id}/continue", json={}
+        )
+        assert handed.json()["cycle"]["id"] == cycle_id
+
+        # Act: the run reports that it could not, with the reason as the
+        # question -- exactly the report the runner sends.
+        back = await async_client.patch(
+            f"/api/automation/v1/improve/cycles/{cycle_id}",
+            json={
+                "status": "PARKED",
+                "parked_question": "You said to publish this, and it cannot "
+                "publish yet: the verification did not pass.",
+                "gate_decisions": [
+                    {
+                        "phase": "publish",
+                        "route": "cycle",
+                        "trigger": "asked the service again",
+                        "rationale": "the verification did not pass",
+                    }
+                ],
+            },
+        )
+
+        # Assert: waiting on the person again, with the new question, and not
+        # offered to the next run.
+        assert back.status_code == 200, back.text
+        listed = (await async_client.get(PARKED)).json()["cycles"]
+        assert [c["id"] for c in listed] == [cycle_id]
+        assert listed[0]["parked_question"].startswith("You said to publish")
+        again = await async_client.post(
+            f"/api/automation/v1/improve/{program_id}/continue", json={}
+        )
+        assert again.json() is None
+        # The first answer is still on the record: it is who decided what.
+        routes = [d["route"] for d in listed[0]["gate_decisions"]]
+        assert "approve" in routes
+
     async def test_a_question_is_answered_once(self, async_client):
         # It stays PARKED until a run carries the answer out, so "is it
         # parked" stopped answering "is it waiting" — and a second answer

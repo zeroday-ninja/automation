@@ -535,6 +535,21 @@ async def update_cycle(
             setattr(cycle, field, updates[field])
     if body.status is ImproveCycleStatus.PARKED and cycle.parked_at is None:
         cycle.parked_at = utcnow()
+    if body.status is ImproveCycleStatus.PARKED and cycle.resolved_at is not None:
+        # A run was handed the person's answer, could not carry it out, and
+        # has parked the cycle again with the reason as its question. That is
+        # raise -> resolve -> cannot resume -> *raise again*, and the cycle
+        # must go back to waiting on the person: still marked answered, the
+        # next run would take it again a minute later, be refused again, and
+        # append the same decision again -- while `/parked` hid it from the
+        # one person who could break the loop, because "answered" is what it
+        # filters out. Observed live against a real approval, once a minute.
+        #
+        # The answer itself is not lost: it is on the gate log, which is the
+        # record of who decided what. Only the "waiting for a run" state is
+        # cleared, so the person sees the new question and can answer it.
+        cycle.resolved_at = None
+        cycle.parked_at = utcnow()
     if "change_class" in updates or "change_evidence" in updates:
         # The class decides who may publish, so it is not taken on the
         # reporter's word. The evidence it sent is re-read here: a report that
@@ -914,9 +929,7 @@ async def get_builder_share(
         # do: the earliest this can be answered is the window's worth of days
         # after the oldest one already counted. The capped claim names when it
         # resumes for the same reason.
-        answerable_on = (
-            utcnow() + timedelta(days=max(0, window - covered))
-        ).date()
+        answerable_on = (utcnow() + timedelta(days=max(0, window - covered))).date()
     return BuilderShareResponse(
         automation_id=automation_id,
         configured_builders=expected,

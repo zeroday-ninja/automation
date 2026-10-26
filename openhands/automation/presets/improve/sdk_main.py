@@ -923,16 +923,29 @@ def publish_resolved_cycle(workspace) -> bool:
         )
     )
     if not authority.get("authorised"):
-        # Their answer was not the only thing standing in the way. Reported
-        # rather than published anyway, and left for them to read: the
-        # missing evidence is on the authority's own answer.
-        print(f"  not authorised: {authority.get('reason')}")
+        # Their answer was not the only thing standing in the way. Raised
+        # again rather than published anyway -- and raised *to the person*,
+        # with the reason as the new question. Parking it without one left it
+        # marked answered, so the next run took it again a minute later, was
+        # refused again, and the person saw nothing, because the waiting list
+        # hides what has been answered. The service clears the answered state
+        # on this report; the question is what they read when it comes back.
+        reason = clamp(authority.get("reason"), 1500) or "the service gave no reason"
+        print(f"  not authorised: {reason}")
         cycle_request(
             "PATCH",
             f"/v1/improve/cycles/{cycle_id}",
-            {"status": "PARKED", "gate_decisions": decisions},
+            {
+                "status": "PARKED",
+                "gate_decisions": decisions,
+                "parked_question": clamp(
+                    f"You said to publish this, and it cannot publish yet: {reason}\n\n"
+                    f"{cycle.get('parked_question') or ''}",
+                    4000,
+                ),
+            },
         )
-        report_phase(f"{repo_label}: still waiting — {authority.get('route')}")
+        report_phase(f"{repo_label}: back to you — {authority.get('route')}")
         return True
 
     merged = None
